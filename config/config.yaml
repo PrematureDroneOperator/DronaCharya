@@ -1,0 +1,41 @@
+camera:
+  device_id: 0
+  # Set stream_url to record from the drone camera over the network.
+  # When set, it takes priority over device_id.
+  # Examples:
+  #   rtsp://192.168.1.1:554/stream        (RTSP – most IP cameras / drones)
+  #   http://192.168.1.1:8080/?action=stream (MJPEG HTTP stream)
+  stream_url: ""                           # ← put your drone's URL here
+  capture_count: 24
+  capture_interval_sec: 0.25
+  frame_width: 1280
+  frame_height: 720
+
+mapping:
+  max_dimension: 1600
+  meters_per_pixel: 0.05
+
+vision:
+  model_path: "models/target_yolo.pt"
+  conf_threshold: 0.35
+  target_class_name: "target"
+  image_size: 640
+
+mission:
+  default_altitude_m: 15.0
+  hover_time_sec: 5
+  mavlink_connection: "udp:127.0.0.1:14550"
+  mavlink_baudrate: 57600
+  home_latitude: null
+  home_longitude: null
+  max_mission_duration_sec: 900
+
+telemetry:
+  command_host: "0.0.0.0"
+  command_port: 14560
+  gcs_host: "127.0.0.1"
+  gcs_port: 14561
+
+logging:
+  level: "INFO"
+  file_name: "dronacharya.log"
