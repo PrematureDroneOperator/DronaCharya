@@ -18,8 +18,6 @@ Usage:
     python3 gcs/jetson_stream_server.py --usb --dev 2  # /dev/video2
     python3 gcs/jetson_stream_server.py --port 8554 --mount /drone
 """
-from __future__ import annotations
-
 import argparse
 import logging
 import sys

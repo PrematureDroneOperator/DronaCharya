@@ -1,24 +1,23 @@
-from __future__ import annotations
-
 import math
 from dataclasses import dataclass
+from typing import List, Tuple
 
 
-def _distance(a: tuple[float, float], b: tuple[float, float]) -> float:
+def _distance(a: Tuple[float, float], b: Tuple[float, float]) -> float:
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
 @dataclass
 class TSPSolution:
-    order: list[int]
+    order: List[int]
     distance_m: float
 
 
 class TSPSolver:
     def solve(
         self,
-        targets_xy: list[tuple[float, float]],
-        start_xy: tuple[float, float] = (0.0, 0.0),
+        targets_xy: List[Tuple[float, float]],
+        start_xy: Tuple[float, float] = (0.0, 0.0),
         include_return_to_start: bool = False,
     ) -> TSPSolution:
         if not targets_xy:
@@ -35,7 +34,7 @@ class TSPSolver:
         total_distance = self._route_distance(route, points)
         return TSPSolution(order=ordered_target_indices, distance_m=total_distance)
 
-    def _nearest_neighbor(self, points: list[tuple[float, float]]) -> list[int]:
+    def _nearest_neighbor(self, points: List[Tuple[float, float]]) -> List[int]:
         unvisited = set(range(1, len(points)))
         route = [0]
 
@@ -47,7 +46,7 @@ class TSPSolver:
 
         return route
 
-    def _two_opt(self, route: list[int], points: list[tuple[float, float]]) -> list[int]:
+    def _two_opt(self, route: List[int], points: List[Tuple[float, float]]) -> List[int]:
         if len(route) < 4:
             return route
 
@@ -69,7 +68,7 @@ class TSPSolver:
             route = best_route
         return route
 
-    def _route_distance(self, route: list[int], points: list[tuple[float, float]]) -> float:
+    def _route_distance(self, route: List[int], points: List[Tuple[float, float]]) -> float:
         if len(route) < 2:
             return 0.0
         total = 0.0

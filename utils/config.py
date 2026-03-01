@@ -1,8 +1,6 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, Optional
 
 import yaml
 
@@ -37,8 +35,8 @@ class MissionConfig:
     hover_time_sec: int = 5
     mavlink_connection: str = "udp:127.0.0.1:14550"
     mavlink_baudrate: int = 57600
-    home_latitude: float | None = None
-    home_longitude: float | None = None
+    home_latitude: Optional[float] = None
+    home_longitude: Optional[float] = None
     max_mission_duration_sec: int = 900
 
 
@@ -77,7 +75,7 @@ class AppConfig:
     logging: LoggingConfig
 
 
-def _merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+def _merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     merged = dict(base)
     for key, value in override.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
@@ -87,7 +85,7 @@ def _merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
-def _default_dict() -> dict[str, Any]:
+def _default_dict() -> Dict[str, Any]:
     return {
         "camera": CameraConfig().__dict__,
         "mapping": MappingConfig().__dict__,
@@ -118,11 +116,11 @@ def ensure_data_dirs(base_dir: Path) -> AppPaths:
     )
 
 
-def load_config(config_path: Path, base_dir: Path | None = None) -> AppConfig:
+def load_config(config_path: Path, base_dir: Optional[Path] = None) -> AppConfig:
     resolved_config_path = config_path.resolve()
     root = base_dir.resolve() if base_dir else resolved_config_path.parents[1]
 
-    raw: dict[str, Any] = {}
+    raw = {}  # type: Dict[str, Any]
     if resolved_config_path.exists():
         with resolved_config_path.open("r", encoding="utf-8") as handle:
             parsed = yaml.safe_load(handle) or {}

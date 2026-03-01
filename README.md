@@ -60,6 +60,13 @@ chmod +x setup.sh
 ./setup.sh
 ```
 
+Jetson Nano base notes:
+- The drone app now runs on Python `3.6` syntax.
+- If `tkinter` is missing, `--mode gui` falls back to CLI automatically.
+- YOLO/Ultralytics is optional and not installed by default in `requirements.txt`.
+- On Jetson, prefer system OpenCV/NumPy packages:
+  - `sudo apt-get install -y python3-opencv python3-numpy`
+
 ## Run
 
 Drone application:

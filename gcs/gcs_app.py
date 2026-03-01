@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 import queue
 import socket
@@ -29,7 +27,7 @@ class GCSApp:
         self.listen_port = tk.IntVar(value=14561)
         self.connection_state = tk.StringVar(value="DISCONNECTED")
 
-        self._listener_thread: threading.Thread | None = None
+        self._listener_thread = None
         self._stop_event = threading.Event()
         self._inbox: "queue.Queue[str]" = queue.Queue()
         self._send_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

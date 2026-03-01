@@ -1,8 +1,6 @@
-from __future__ import annotations
-
 import socket
 import threading
-from typing import Callable
+from typing import Callable, Optional, Tuple
 
 
 VALID_COMMANDS = {
@@ -18,13 +16,13 @@ VALID_COMMANDS = {
 
 
 class CommandListener:
-    def __init__(self, host: str, port: int, on_command: Callable[[str, tuple[str, int]], None], logger) -> None:
+    def __init__(self, host: str, port: int, on_command: Callable[[str, Tuple[str, int]], None], logger) -> None:
         self.host = host
         self.port = port
         self.on_command = on_command
         self.logger = logger
 
-        self._thread: threading.Thread | None = None
+        self._thread = None  # type: Optional[threading.Thread]
         self._stop_event = threading.Event()
 
     def start(self) -> None:

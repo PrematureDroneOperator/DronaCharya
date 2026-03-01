@@ -1,17 +1,16 @@
-from __future__ import annotations
-
 import logging
 import sys
 from collections import deque
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from threading import Lock
+from typing import Deque, List, Tuple
 
 
 class RingBufferLogHandler(logging.Handler):
     def __init__(self, max_entries: int = 500) -> None:
         super().__init__()
-        self._records: deque[str] = deque(maxlen=max_entries)
+        self._records = deque(maxlen=max_entries)  # type: Deque[str]
         self._lock = Lock()
 
     def emit(self, record: logging.LogRecord) -> None:
@@ -22,12 +21,12 @@ class RingBufferLogHandler(logging.Handler):
         with self._lock:
             self._records.append(message)
 
-    def snapshot(self) -> list[str]:
+    def snapshot(self) -> List[str]:
         with self._lock:
             return list(self._records)
 
 
-def setup_logger(name: str, log_file: Path, level: str = "INFO") -> tuple[logging.Logger, RingBufferLogHandler]:
+def setup_logger(name: str, log_file: Path, level: str = "INFO") -> Tuple[logging.Logger, RingBufferLogHandler]:
     logger = logging.getLogger(name)
     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
     logger.handlers.clear()

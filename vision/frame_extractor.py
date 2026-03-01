@@ -1,27 +1,14 @@
 """vision/frame_extractor.py
-Extract individual frames from a recorded video file and save them inside a
-target directory as zero-padded JPEG images.
+Extract frames from a recorded video file into a target directory.
 
-Directory layout produced
--------------------------
-::
-
-    session-0001/
-    ├── recording.mp4
-    └── frames/
-        ├── frame_000001.jpg
-        ├── frame_000002.jpg
-        └── …
-
-Usage (standalone)
-------------------
+Usage:
     python -m vision.frame_extractor path/to/recording.mp4 --out frames/
 """
-from __future__ import annotations
 
 import argparse
 import logging
 from pathlib import Path
+from typing import Union
 
 import cv2
 
@@ -29,20 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class FrameExtractor:
-    """Extract every frame from a video file to a directory.
-
-    Parameters
-    ----------
-    fps:
-        Informational – used only for logging; the actual frame rate is read
-        from the video file itself.
-    prefix:
-        Filename prefix for each frame image (default ``"frame_"``).
-    ext:
-        Image extension / format (default ``"jpg"``).
-    jpeg_quality:
-        JPEG compression quality 0-100 (default ``95``).
-    """
+    """Extract frames from video files into image sequences."""
 
     def __init__(
         self,
@@ -56,98 +30,74 @@ class FrameExtractor:
         self.ext = ext.lstrip(".")
         self.jpeg_quality = jpeg_quality
 
-    def extract(self, video_path: str | Path, output_dir: str | Path) -> int:
-        """Read *video_path* and write every frame to *output_dir*.
-
-        Parameters
-        ----------
-        video_path:
-            Path to the recorded ``.mp4`` (or any OpenCV-readable format).
-        output_dir:
-            Directory where frame images will be saved.  Created if absent.
-
-        Returns
-        -------
-        int
-            Number of frames successfully extracted.
-
-        Raises
-        ------
-        FileNotFoundError
-            If *video_path* does not exist.
-        RuntimeError
-            If the video file cannot be opened.
-        """
+    def extract(self, video_path: Union[str, Path], output_dir: Union[str, Path]) -> int:
         video_path = Path(video_path)
         output_dir = Path(output_dir)
 
         if not video_path.exists():
-            raise FileNotFoundError(f"Video not found: {video_path}")
+            raise FileNotFoundError("Video not found: {}".format(video_path))
 
         output_dir.mkdir(parents=True, exist_ok=True)
 
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
-            raise RuntimeError(f"Cannot open video file: {video_path}")
+            raise RuntimeError("Cannot open video file: {}".format(video_path))
 
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        actual_fps   = cap.get(cv2.CAP_PROP_FPS) or self.fps
-        width        = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height       = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_fps = cap.get(cv2.CAP_PROP_FPS) or self.fps
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
         logger.info(
             "Extracting frames from %s  [%dx%d, %.1f fps, ~%d frames]",
-            video_path.name, width, height, actual_fps, total_frames,
+            video_path.name,
+            width,
+            height,
+            actual_fps,
+            total_frames,
         )
 
         encode_params = [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality]
         count = 0
-
         try:
             while True:
                 ok, frame = cap.read()
                 if not ok:
                     break
                 count += 1
-                filename = output_dir / f"{self.prefix}{count:06d}.{self.ext}"
+                filename = output_dir / "{0}{1:06d}.{2}".format(self.prefix, count, self.ext)
                 cv2.imwrite(str(filename), frame, encode_params)
         finally:
             cap.release()
 
-        logger.info("Extraction complete – %d frames saved to %s", count, output_dir)
+        logger.info("Extraction complete - %d frames saved to %s", count, output_dir)
         return count
-
-    # ------------------------------------------------------------------
-    # Convenience: extract a subset (every N-th frame)
-    # ------------------------------------------------------------------
 
     def extract_nth(
         self,
-        video_path: str | Path,
-        output_dir: str | Path,
+        video_path: Union[str, Path],
+        output_dir: Union[str, Path],
         every_n: int = 1,
     ) -> int:
-        """Like :meth:`extract` but only saves every *every_n*-th frame.
+        """Extract only every N-th frame."""
+        if every_n <= 0:
+            raise ValueError("every_n must be >= 1")
 
-        Useful for creating lower-resolution datasets without storing all
-        30 frames per second.
-        """
         video_path = Path(video_path)
         output_dir = Path(output_dir)
 
         if not video_path.exists():
-            raise FileNotFoundError(f"Video not found: {video_path}")
+            raise FileNotFoundError("Video not found: {}".format(video_path))
 
         output_dir.mkdir(parents=True, exist_ok=True)
 
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
-            raise RuntimeError(f"Cannot open video file: {video_path}")
+            raise RuntimeError("Cannot open video file: {}".format(video_path))
 
         encode_params = [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality]
         frame_idx = 0
-        saved     = 0
-
+        saved = 0
         try:
             while True:
                 ok, frame = cap.read()
@@ -156,30 +106,27 @@ class FrameExtractor:
                 frame_idx += 1
                 if frame_idx % every_n == 0:
                     saved += 1
-                    filename = output_dir / f"{self.prefix}{saved:06d}.{self.ext}"
+                    filename = output_dir / "{0}{1:06d}.{2}".format(self.prefix, saved, self.ext)
                     cv2.imwrite(str(filename), frame, encode_params)
         finally:
             cap.release()
 
-        logger.info(
-            "Sparse extraction (every %d frames) – %d frames saved to %s",
-            every_n, saved, output_dir,
-        )
+        logger.info("Sparse extraction (every %d frames) - %d frames saved to %s", every_n, saved, output_dir)
         return saved
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Extract frames from a recorded video")
-    p.add_argument("video", help="Path to the video file")
-    p.add_argument("--out", default="frames", help="Output directory (default: frames/)")
-    p.add_argument("--every-n", type=int, default=1, help="Save every N-th frame (default: 1)")
-    p.add_argument("--quality", type=int, default=95, help="JPEG quality 0-100 (default: 95)")
-    return p.parse_args()
+    parser = argparse.ArgumentParser(description="Extract frames from a recorded video")
+    parser.add_argument("video", help="Path to the video file")
+    parser.add_argument("--out", default="frames", help="Output directory (default: frames/)")
+    parser.add_argument("--every-n", type=int, default=1, help="Save every N-th frame (default: 1)")
+    parser.add_argument("--quality", type=int, default=95, help="JPEG quality 0-100 (default: 95)")
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     args = _parse_args()
     extractor = FrameExtractor(jpeg_quality=args.quality)
-    n = extractor.extract_nth(args.video, args.out, every_n=args.every_n)
-    print(f"Extracted {n} frames → {args.out}")
+    count = extractor.extract_nth(args.video, args.out, every_n=args.every_n)
+    print("Extracted {} frames -> {}".format(count, args.out))

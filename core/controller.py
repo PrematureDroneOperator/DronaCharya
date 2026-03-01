@@ -1,12 +1,10 @@
-from __future__ import annotations
-
 import json
 import queue
 import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple
 
 from mapping.mapper import TerrainMapper
 from navigation.mavlink_controller import MavlinkController
@@ -33,16 +31,16 @@ class AppState:
     last_detection_path: str = ""
     last_route_path: str = ""
     last_error: str = ""
-    takeoff_latitude: float | None = None
-    takeoff_longitude: float | None = None
+    takeoff_latitude: Optional[float] = None
+    takeoff_longitude: Optional[float] = None
 
 
 @dataclass
 class CommandRequest:
     command: str
     source: str
-    wait_event: threading.Event | None = None
-    response: dict[str, Any] = field(default_factory=dict)
+    wait_event: Optional[threading.Event] = None
+    response: Dict[str, Any] = field(default_factory=dict)
 
 
 class DroneAcharyaController:
@@ -60,16 +58,16 @@ class DroneAcharyaController:
         self.tsp_solver = TSPSolver()
         self.transformer = CoordinateTransformer(config.mapping.meters_per_pixel)
 
-        self._targets: list[dict[str, Any]] = []
-        self._ordered_waypoints: list[dict[str, Any]] = []
+        self._targets = []  # type: List[Dict[str, Any]]
+        self._ordered_waypoints = []  # type: List[Dict[str, Any]]
         self._abort_event = threading.Event()
 
         # Recording
-        self._recorder: DroneRecorder | None = None
-        self._rec_thread: threading.Thread | None = None
+        self._recorder = None  # type: Optional[DroneRecorder]
+        self._rec_thread = None  # type: Optional[threading.Thread]
         self._rec_stop_event = threading.Event()
 
-        self._command_queue: queue.Queue[CommandRequest | None] = queue.Queue()
+        self._command_queue = queue.Queue()  # type: queue.Queue
         self._worker_stop = threading.Event()
         self._worker_thread = threading.Thread(target=self._command_worker, name="CommandWorker", daemon=True)
 
@@ -92,7 +90,7 @@ class DroneAcharyaController:
 
     def submit_command(
         self, command: str, source: str = "local", wait: bool = True, timeout: float = 3600.0
-    ) -> dict[str, Any]:
+    ) -> Dict[str, Any]:
         event = threading.Event() if wait else None
         request = CommandRequest(command=command, source=source, wait_event=event)
         self._command_queue.put(request)
@@ -104,19 +102,19 @@ class DroneAcharyaController:
             return request.response
         return {"ok": True, "message": f"Command '{command}' queued"}
 
-    def get_status_snapshot(self) -> dict[str, Any]:
+    def get_status_snapshot(self) -> Dict[str, Any]:
         with self.state_lock:
             snapshot = asdict(self.state)
         snapshot["queue_depth"] = self._command_queue.qsize()
         return snapshot
 
-    def get_recent_logs(self, offset: int = 0) -> tuple[int, list[str]]:
+    def get_recent_logs(self, offset: int = 0) -> Tuple[int, List[str]]:
         records = self.log_handler.snapshot()
         if offset < 0:
             offset = 0
         return len(records), records[offset:]
 
-    def _on_remote_command(self, command: str, source_addr: tuple[str, int]) -> None:
+    def _on_remote_command(self, command: str, source_addr: Tuple[str, int]) -> None:
         self.submit_command(command=command, source=f"gcs:{source_addr[0]}:{source_addr[1]}", wait=False)
 
     def _command_worker(self) -> None:
@@ -153,7 +151,7 @@ class DroneAcharyaController:
         }
         return aliases.get(canonical, canonical)
 
-    def _execute_command(self, command: str, source: str) -> dict[str, Any]:
+    def _execute_command(self, command: str, source: str) -> Dict[str, Any]:
         self.logger.info("Executing command '%s' (source=%s)", command, source)
 
         if command == "START_MAPPING":
@@ -176,7 +174,7 @@ class DroneAcharyaController:
             return self._stop_recording_local()
         return {"ok": False, "message": f"Unsupported command: {command}"}
 
-    def _run_mapping(self) -> dict[str, Any]:
+    def _run_mapping(self) -> Dict[str, Any]:
         self._set_state(mission_state="MAPPING", mapping_progress=0.0, last_error="")
         self.telemetry_server.send_log("Mapping started.")
 
@@ -191,7 +189,7 @@ class DroneAcharyaController:
         self.telemetry_server.send_log(f"Mapping complete: {map_path}")
         return {"ok": True, "message": f"Map generated at {map_path}", "map_path": str(map_path)}
 
-    def _run_detection(self) -> dict[str, Any]:
+    def _run_detection(self) -> Dict[str, Any]:
         snapshot = self.get_status_snapshot()
         if not snapshot["last_map_path"]:
             raise RuntimeError("Detection requires an existing map. Run 'map' first.")
@@ -218,7 +216,7 @@ class DroneAcharyaController:
             "count": len(targets),
         }
 
-    def _run_planning(self) -> dict[str, Any]:
+    def _run_planning(self) -> Dict[str, Any]:
         if not self._targets:
             raise RuntimeError("Route planning requires detections. Run 'detect' first.")
 
@@ -284,7 +282,7 @@ class DroneAcharyaController:
             "distance_m": solution.distance_m,
         }
 
-    def _start_mission(self) -> dict[str, Any]:
+    def _start_mission(self) -> Dict[str, Any]:
         if not self._ordered_waypoints:
             raise RuntimeError("Mission route not available. Run 'plan' first.")
 
@@ -323,7 +321,7 @@ class DroneAcharyaController:
     # Recording (runs locally on the drone / Jetson Nano)
     # ------------------------------------------------------------------
 
-    def _start_recording_local(self) -> dict[str, Any]:
+    def _start_recording_local(self) -> Dict[str, Any]:
         """Start capturing from the onboard camera and save locally."""
         if self._rec_thread and self._rec_thread.is_alive():
             return {"ok": False, "message": "Recording already in progress."}
@@ -347,7 +345,7 @@ class DroneAcharyaController:
 
         session_dir = str(self._recorder.session_dir)
         self._set_state(recording_state="RECORDING", last_recording_session=session_dir)
-        self.telemetry_server.send_log(f"Recording started → {session_dir}")
+        self.telemetry_server.send_log("Recording started -> {}".format(session_dir))
         self._send_status()
 
         self._rec_thread = threading.Thread(
@@ -362,7 +360,7 @@ class DroneAcharyaController:
         while not self._rec_stop_event.is_set():
             ok = self._recorder.record_frame()
             if not ok:
-                self.telemetry_server.send_log("Camera source exhausted – recording stopped automatically.", level="WARNING")
+                self.telemetry_server.send_log("Camera source exhausted - recording stopped automatically.", level="WARNING")
                 break
         video_path = self._recorder.stop()
         session_dir = self._recorder.session_dir
@@ -370,20 +368,20 @@ class DroneAcharyaController:
         frame_count = len(list(frames_dir.glob("*.jpg"))) if frames_dir and frames_dir.exists() else 0
         self._set_state(recording_state="IDLE")
         self.telemetry_server.send_log(
-            f"Recording saved → {video_path} | {frame_count} frames extracted to {frames_dir}"
+            "Recording saved -> {} | {} frames extracted to {}".format(video_path, frame_count, frames_dir)
         )
         self._send_status()
 
-    def _stop_recording_local(self) -> dict[str, Any]:
+    def _stop_recording_local(self) -> Dict[str, Any]:
         """Signal the recording loop to stop."""
         if not (self._rec_thread and self._rec_thread.is_alive()):
             return {"ok": False, "message": "No recording in progress."}
         self._rec_stop_event.set()
         self._set_state(recording_state="STOPPING")
         self._send_status()
-        return {"ok": True, "message": "Stop signal sent. Extracting frames…"}
+        return {"ok": True, "message": "Stop signal sent. Extracting frames..."}
 
-    def _abort_mission(self) -> dict[str, Any]:
+    def _abort_mission(self) -> Dict[str, Any]:
         self._abort_event.set()
         self._set_state(mission_state="ABORT_REQUESTED")
         self.telemetry_server.send_log("Abort requested by operator.", level="WARNING")
@@ -395,7 +393,7 @@ class DroneAcharyaController:
         self._set_state(mapping_progress=round(percentage, 1))
         self._send_status()
 
-    def _resolve_takeoff_gps(self) -> dict[str, float]:
+    def _resolve_takeoff_gps(self) -> Dict[str, float]:
         with self.state_lock:
             if self.state.takeoff_latitude is not None and self.state.takeoff_longitude is not None:
                 return {
@@ -432,7 +430,7 @@ class DroneAcharyaController:
             except Exception:
                 pass
 
-    def _send_live_telemetry(self, payload: dict[str, Any]) -> None:
+    def _send_live_telemetry(self, payload: Dict[str, Any]) -> None:
         self.telemetry_server.send_event("TELEMETRY", payload)
 
     def _set_state(self, **updates: Any) -> None:
@@ -443,3 +441,5 @@ class DroneAcharyaController:
 
     def _send_status(self) -> None:
         self.telemetry_server.send_status(self.get_status_snapshot())
+
+

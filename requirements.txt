@@ -1,5 +1,5 @@
-numpy>=1.24.0
-opencv-python>=4.8.0
-ultralytics>=8.2.0
-pymavlink>=2.4.40
-PyYAML>=6.0.0
+# Jetson Nano base runtime (Python 3.6-compatible)
+# OpenCV and NumPy are expected from JetPack system packages.
+PyYAML>=5.4,<7.0
+pymavlink>=2.4.0
+dataclasses>=0.8; python_version < "3.7"

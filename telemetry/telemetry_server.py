@@ -1,9 +1,7 @@
-from __future__ import annotations
-
 import json
 import socket
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from telemetry.command_listener import CommandListener
 from utils.config import TelemetryConfig
@@ -13,10 +11,10 @@ class TelemetryServer:
     def __init__(self, config: TelemetryConfig, logger) -> None:
         self.config = config
         self.logger = logger
-        self._listener: CommandListener | None = None
+        self._listener = None  # type: Optional[CommandListener]
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-    def start(self, on_command: Callable[[str, tuple[str, int]], None]) -> None:
+    def start(self, on_command: Callable[[str, Tuple[str, int]], None]) -> None:
         self._listener = CommandListener(
             host=self.config.command_host,
             port=self.config.command_port,
@@ -31,13 +29,13 @@ class TelemetryServer:
             self._listener.stop()
         self._socket.close()
 
-    def send_status(self, status: dict[str, Any]) -> None:
+    def send_status(self, status: Dict[str, Any]) -> None:
         self.send_event("STATUS", status)
 
     def send_log(self, message: str, level: str = "INFO") -> None:
         self.send_event("LOG", {"level": level, "message": message})
 
-    def send_event(self, event_type: str, payload: dict[str, Any]) -> None:
+    def send_event(self, event_type: str, payload: Dict[str, Any]) -> None:
         packet = {
             "type": event_type,
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),

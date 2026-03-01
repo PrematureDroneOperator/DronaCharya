@@ -1,10 +1,8 @@
-from __future__ import annotations
-
 import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 import cv2
 
@@ -18,7 +16,7 @@ class TerrainMapper:
         self.logger = logger
         self.stitcher = TerrainStitcher(max_dimension=config.mapping.max_dimension)
 
-    def run_mapping(self, progress_callback: Callable[[float], None] | None = None) -> Path:
+    def run_mapping(self, progress_callback: Optional[Callable[[float], None]] = None) -> Path:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         session_dir = self.config.paths.maps_dir / f"session_{timestamp}"
         frames_dir = session_dir / "frames"

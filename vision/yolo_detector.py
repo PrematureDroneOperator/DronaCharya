@@ -1,9 +1,7 @@
-from __future__ import annotations
-
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Tuple
 
 import cv2
 
@@ -31,7 +29,7 @@ class YoloTargetDetector:
         self.transformer = CoordinateTransformer(config.mapping.meters_per_pixel)
         self._model: Any = None
 
-    def detect(self, flatmap_path: Path) -> tuple[list[dict[str, Any]], Path, Path]:
+    def detect(self, flatmap_path: Path) -> Tuple[List[Dict[str, Any]], Path, Path]:
         if not flatmap_path.exists():
             raise FileNotFoundError(f"Map file not found: {flatmap_path}")
         if YOLO is None:
@@ -59,7 +57,7 @@ class YoloTargetDetector:
 
         result = results[0]
         class_names = result.names
-        targets: list[dict[str, Any]] = []
+        targets = []  # type: List[Dict[str, Any]]
 
         for idx, box in enumerate(result.boxes):
             cls_id = int(box.cls.item())
@@ -107,7 +105,7 @@ class YoloTargetDetector:
         self.logger.info("Detected %s targets. Output: %s", len(targets), json_path)
         return targets, annotated_path, json_path
 
-    def _draw_annotation(self, image, target: dict[str, Any]) -> None:
+    def _draw_annotation(self, image, target: Dict[str, Any]) -> None:
         x1, y1, x2, y2 = [int(v) for v in target["bbox_xyxy"]]
         center = (int(target["pixel_x"]), int(target["pixel_y"]))
         label = f'{target["class_name"]}:{target["confidence"]:.2f}'

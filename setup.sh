@@ -12,8 +12,33 @@ fi
 python3 -m venv .venv
 source .venv/bin/activate
 
-python -m pip install --upgrade pip setuptools wheel
+if python - <<'PY'
+import sys
+raise SystemExit(0 if sys.version_info[:2] <= (3, 6) else 1)
+PY
+then
+  python -m pip install --upgrade "pip<22" "setuptools<60" "wheel<0.38"
+else
+  python -m pip install --upgrade pip setuptools wheel
+fi
 python -m pip install -r requirements.txt
+
+python - <<'PY'
+import importlib
+
+missing = []
+for module in ("cv2", "numpy"):
+    try:
+        importlib.import_module(module)
+    except Exception:
+        missing.append(module)
+
+if missing:
+    print("WARNING: Missing runtime module(s): {}".format(", ".join(missing)))
+    print("On Jetson Nano, install system packages, for example:")
+    print("  sudo apt-get update")
+    print("  sudo apt-get install -y python3-opencv python3-numpy")
+PY
 
 mkdir -p data/maps data/detections data/routes data/logs
 

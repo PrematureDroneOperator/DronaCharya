@@ -1,7 +1,5 @@
-from __future__ import annotations
-
 import time
-from typing import Callable
+from typing import Callable, Dict, List, Optional
 
 from navigation.mavlink_controller import MavlinkController
 
@@ -19,10 +17,10 @@ class MissionExecutor:
 
     def execute(
         self,
-        waypoints: list[dict[str, float]],
-        abort_checker: Callable[[], bool] | None = None,
-        telemetry_callback: Callable[[dict], None] | None = None,
-    ) -> dict[str, float]:
+        waypoints: List[Dict[str, float]],
+        abort_checker: Optional[Callable[[], bool]] = None,
+        telemetry_callback: Optional[Callable[[Dict], None]] = None,
+    ) -> Dict[str, float]:
         if not waypoints:
             raise ValueError("No mission waypoints available.")
 

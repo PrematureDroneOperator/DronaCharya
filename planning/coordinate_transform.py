@@ -1,6 +1,5 @@
-from __future__ import annotations
-
 import math
+from typing import Tuple
 
 
 class CoordinateTransformer:
@@ -11,7 +10,7 @@ class CoordinateTransformer:
 
     def pixel_to_relative(
         self, pixel_x: float, pixel_y: float, image_width: int, image_height: int
-    ) -> tuple[float, float]:
+    ) -> Tuple[float, float]:
         center_x = image_width / 2.0
         center_y = image_height / 2.0
 
@@ -21,7 +20,7 @@ class CoordinateTransformer:
 
     def relative_to_gps(
         self, start_latitude: float, start_longitude: float, relative_x_m: float, relative_y_m: float
-    ) -> tuple[float, float]:
+    ) -> Tuple[float, float]:
         meters_per_degree_lat = 111_320.0
         meters_per_degree_lon = max(1e-6, meters_per_degree_lat * math.cos(math.radians(start_latitude)))
 
@@ -32,7 +31,7 @@ class CoordinateTransformer:
 
     def gps_to_relative(
         self, start_latitude: float, start_longitude: float, target_latitude: float, target_longitude: float
-    ) -> tuple[float, float]:
+    ) -> Tuple[float, float]:
         meters_per_degree_lat = 111_320.0
         meters_per_degree_lon = max(1e-6, meters_per_degree_lat * math.cos(math.radians(start_latitude)))
 

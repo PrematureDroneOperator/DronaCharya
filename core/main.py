@@ -1,14 +1,19 @@
-from __future__ import annotations
-
 import argparse
 from pathlib import Path
 
 from core.controller import DroneAcharyaController
 from core.mode_selector import select_mode
 from ui.cli_interface import CLIInterface
-from ui.gui_app import DroneGUI
 from utils.config import load_config
 from utils.logger import setup_logger
+
+
+def _load_gui_class():
+    try:
+        from ui.gui_app import DroneGUI
+    except Exception as exc:
+        return None, exc
+    return DroneGUI, None
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,13 +37,20 @@ def main() -> int:
         level=config.logging.level,
     )
 
-    mode = args.mode or select_mode()
+    mode = (args.mode or select_mode()).lower()
+    gui_cls = None
+    if mode == "gui":
+        gui_cls, gui_error = _load_gui_class()
+        if gui_cls is None:
+            logger.warning("GUI unavailable (%s). Falling back to CLI mode.", gui_error)
+            mode = "cli"
+
     controller = DroneAcharyaController(config=config, logger=logger, log_handler=log_handler)
     controller.start(mode=mode)
 
     try:
         if mode == "gui":
-            app = DroneGUI(controller)
+            app = gui_cls(controller)  # type: ignore[operator]
             app.run()
         else:
             cli = CLIInterface(controller)

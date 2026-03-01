@@ -1,7 +1,5 @@
-from __future__ import annotations
-
 import time
-from typing import Any
+from typing import Any, Dict, List, Set, Union
 
 from pymavlink import mavutil
 
@@ -35,11 +33,11 @@ class MavlinkController:
             finally:
                 self.master = None
 
-    def recv_match(self, types: list[str] | str, timeout: float = 1.0):
+    def recv_match(self, types: Union[List[str], str], timeout: float = 1.0):
         self._require_connection()
         return self.master.recv_match(type=types, blocking=True, timeout=timeout)
 
-    def get_current_gps(self, timeout_sec: int = 20) -> dict[str, float]:
+    def get_current_gps(self, timeout_sec: int = 20) -> Dict[str, float]:
         self._require_connection()
         deadline = time.time() + timeout_sec
 
@@ -80,7 +78,7 @@ class MavlinkController:
         self.master.set_mode(mapping[mode])
         self.logger.info("Set flight mode to %s", mode)
 
-    def upload_mission(self, waypoints: list[dict[str, float]]) -> None:
+    def upload_mission(self, waypoints: List[Dict[str, float]]) -> None:
         self._require_connection()
         if not waypoints:
             raise ValueError("No waypoints provided.")
@@ -90,7 +88,7 @@ class MavlinkController:
         time.sleep(0.5)
         self.master.waypoint_count_send(len(waypoints))
 
-        served: set[int] = set()
+        served = set()  # type: Set[int]
         upload_deadline = time.time() + max(30, len(waypoints) * 8)
 
         while len(served) < len(waypoints) and time.time() < upload_deadline:
