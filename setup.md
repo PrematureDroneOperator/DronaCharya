@@ -1,530 +1,562 @@
 # 🛸 DronaCharya — GCS ↔ Drone Connection Setup Guide
 
-> **Interactive setup guide** — follow the sections in order.  
-> Each section has a ✅ **checkpoint** so you know when you can move on.
+> **Real hardware topology:**  
+> SiK Telemetry Radio → Pixhawk TELEM port → UART → Jetson Nano (runs DronaCharya)
 
 ---
 
 ## Table of Contents
 
-1. [System Architecture Overview](#1-system-architecture-overview)
-2. [Prerequisites](#2-prerequisites)
-3. [Scenario A — Direct Wi-Fi / LAN Connection](#3-scenario-a--direct-wi-fi--lan-connection)
-4. [Scenario B — SiK Telemetry Radio (915 MHz / 433 MHz)](#4-scenario-b--sik-telemetry-radio)
-5. [Configuring `config.yaml` on Both Sides](#5-configuring-configyaml-on-both-sides)
-6. [Starting the Drone-Side App (Jetson Nano)](#6-starting-the-drone-side-app-jetson-nano)
-7. [Starting the GCS App on Your Laptop](#7-starting-the-gcs-app-on-your-laptop)
-8. [Verifying the Connection is Live](#8-verifying-the-connection-is-live)
-9. [Sending Mission Commands](#9-sending-mission-commands)
+1. [System Architecture — Read This First](#1-system-architecture--read-this-first)
+2. [Two Separate Communication Channels](#2-two-separate-communication-channels)
+3. [Prerequisites Checklist](#3-prerequisites-checklist)
+4. [Channel 1 — Jetson↔Pixhawk via UART (MAVLink)](#4-channel-1--jetsonnpixhawk-via-uart-mavlink)
+5. [Channel 2 — GCS Laptop↔Jetson via Wi-Fi (DronaCharya UDP)](#5-channel-2--gcs-laptopjetson-via-wi-fi-dronacharya-udp)
+6. [Channel 2 (Alt) — GCS Laptop↔Jetson via SiK Radio + Serial Bridge](#6-channel-2-alt--gcs-laptopjetson-via-sik-radio--serial-bridge)
+7. [config.yaml — Full Reference for This Setup](#7-configyaml--full-reference-for-this-setup)
+8. [Starting Everything — Boot Order Matters](#8-starting-everything--boot-order-matters)
+9. [Verifying the Connection End-to-End](#9-verifying-the-connection-end-to-end)
 10. [Debug Tips & Troubleshooting](#10-debug-tips--troubleshooting)
 
 ---
 
-## 1. System Architecture Overview
+## 1. System Architecture — Read This First
 
 ```
-┌──────────────────────────────────┐        UDP / Radio Link        ┌──────────────────────────────────┐
-│         LAPTOP  (GCS)            │◄──────────────────────────────►│      DRONE  (Jetson Nano)        │
-│                                  │                                 │                                  │
-│  gcs/gcs_app.py                  │   Commands  →  port 14560      │  main.py  (core/main.py)         │
-│  • Sends commands via UDP        │   Telemetry ←  port 14561      │  telemetry/command_listener.py   │
-│  • Listens for telemetry on      │                                 │  telemetry/telemetry_server.py   │
-│    port 14561 (listen_port)      │                                 │                                  │
-└──────────────────────────────────┘                                 └──────────────────────────────────┘
+╔════════════════════════════════════════════════════════════════════════════╗
+║                          FULL SYSTEM DIAGRAM                               ║
+╠═══════════════════╦════════════════════════════════════════════════════════╣
+║   LAPTOP (GCS)    ║                   DRONE                                ║
+║                   ║                                                        ║
+║  gcs_app.py       ║     Wi-Fi / Ethernet (Channel 2 — DronaCharya UDP)    ║
+║  UDP 14560/14561  ╠═══════════════════════════════════╗                   ║
+║                   ║                                   ▼                   ║
+║                   ║                         ┌─────────────────┐           ║
+║                   ║                         │   Jetson Nano   │           ║
+║  [SiK USB Dongle] ║                         │  main.py        │           ║
+║  (QGC/MavProxy)   ║ RF Link (Channel 1      │  (DronaCharya)  │           ║
+║  MAVLink only  ◄══╬═ MAVLink via SiK) ═══► │  pymavlink      │           ║
+║                   ║                         └───────┬─────────┘           ║
+║                   ║                                 │ UART pins           ║
+║                   ║                                 │ (TX→RX, RX→TX, GND)║
+║                   ║                         ┌───────▼─────────┐           ║
+║                   ║                         │    Pixhawk FC   │           ║
+║                   ║                         │  (autopilot)    │           ║
+║                   ║                         └───────┬─────────┘           ║
+║                   ║                                 │ TELEM1 port         ║
+║                   ║                         ┌───────▼─────────┐           ║
+║                   ║                         │  SiK Radio (air)│           ║
+║                   ╚═════════════════════════╧═════════════════╧═══════════╝
 ```
-
-### Port Summary
-
-| Direction | Source | Destination | Port | Protocol |
-|-----------|--------|-------------|------|----------|
-| GCS → Drone (command) | Laptop | Jetson Nano | **14560** | UDP |
-| Drone → GCS (telemetry) | Jetson Nano | Laptop | **14561** | UDP |
-
-Both sides use **UDP sockets only** — there is no TCP handshake. This means the connection is "fire and forget"; if the link goes down, packets are silently dropped.
 
 ---
 
-## 2. Prerequisites
+## 2. Two Separate Communication Channels
 
-### On Your Laptop (GCS Side)
+This is the most important thing to understand. **There are exactly two independent comms channels**, and they serve different purposes:
 
-- [ ] Python 3.9+ installed (`python --version`)
-- [ ] Dependencies installed:
-  ```powershell
-  cd C:\Users\LENOVO\Documents\college\Hackathons\Cognizance\DronaCharya
-  pip install -r requirements.txt
-  ```
-- [ ] Firewall allows UDP on ports **14560** and **14561** (see [Debug Tips §10.1](#101-windows-firewall-blocking-udp))
+| | Channel 1 (MAVLink) | Channel 2 (DronaCharya) |
+|---|---|---|
+| **Purpose** | Flight controller telemetry, GPS, attitude, arming | DronaCharya app commands (mapping, detection, abort…) |
+| **Protocol** | MAVLink v1/v2 | Custom plaintext UDP |
+| **Physical path** | SiK Radio ↔ Pixhawk TELEM ↔ Pixhawk UART ↔ Jetson | Wi-Fi/LAN (or serial bridge) between Laptop and Jetson |
+| **Ports** | 14550 (MAVLink standard) | 14560 (commands) / 14561 (telemetry) |
+| **Who reads it** | pymavlink inside DronaCharya, QGroundControl | `gcs_app.py` on laptop, `command_listener.py` on Jetson |
+| **Goes through SiK?** | ✅ Yes | ❌ No — SiK is busy with Pixhawk MAVLink |
 
-### On the Drone (Jetson Nano Side)
-
-- [ ] DronaCharya repo cloned
-- [ ] Dependencies installed (`pip install -r requirements.txt`)
-- [ ] YOLOv8 model weights present at `models/target_yolo.pt`
-- [ ] Camera connected and tested
+> ⚠️ **Common Mistake**: People assume the SiK radio carries DronaCharya commands. It doesn't.  
+> The SiK radio is wired to Pixhawk's **TELEM port** and only speaks MAVLink.  
+> DronaCharya's `gcs_app.py` commands travel over **Wi-Fi** directly to the Jetson.
 
 ---
 
-## 3. Scenario A — Direct Wi-Fi / LAN Connection
+## 3. Prerequisites Checklist
 
-Use this when your laptop and the Jetson Nano are on the **same Wi-Fi network or Ethernet switch** (e.g., during bench testing, or when the drone is close enough for Wi-Fi range).
+### Hardware Wiring (verify before anything)
 
-### Step 1 — Find the Jetson Nano's IP address
+- [ ] SiK radio connected to **Pixhawk TELEM1** port (JST-GH 6-pin cable)
+- [ ] Pixhawk connected to Jetson Nano via **UART**:
+  - Pixhawk `TELEM2` TX → Jetson UART RX
+  - Pixhawk `TELEM2` RX → Jetson UART TX
+  - Pixhawk GND → Jetson GND
+  - **Do NOT connect 5V** if Jetson is powered separately
+- [ ] SiK USB radio dongle plugged into laptop
+- [ ] Laptop and Jetson Nano on the **same Wi-Fi network** (both connected to same router/hotspot)
 
-On the Jetson Nano, run:
-```bash
-hostname -I
-# Example output: 192.168.1.42
-```
+> **Which UART port on Jetson Nano?**  
+> Jetson Nano has UART pins on the 40-pin GPIO header.  
+> Default UART device: `/dev/ttyTHS1` (pins 8=TX, 10=RX)  
+> You may need to enable it first — see [§10.3](#103-enabling-uart-on-jetson-nano).
 
-Note this IP. You will enter it in the GCS app as **Drone Host**.
+### Software
 
-### Step 2 — Verify line-of-sight via ping
-
-From your **laptop**:
-```powershell
-ping 192.168.1.42
-```
-You should see replies with low latency (< 5 ms on LAN). If you get timeouts, fix the network before proceeding.
-
-### Step 3 — Update `config.yaml` on the Jetson
-
-On the **Jetson Nano**, edit `config/config.yaml`:
-
-```yaml
-telemetry:
-  command_host: "0.0.0.0"      # Listen on all interfaces — leave this as-is
-  command_port: 14560           # Drone listens for GCS commands here
-  gcs_host: "192.168.1.XX"     # ← YOUR LAPTOP'S IP on the same network
-  gcs_port: 14561               # Drone sends telemetry to this port on the laptop
-```
-
-To find your **laptop's IP**:
-```powershell
-ipconfig
-# Look for "IPv4 Address" under your Wi-Fi adapter
-```
-
-✅ **Checkpoint A**: You can ping the Jetson from the laptop, and `config.yaml` has both IPs filled in.
+- [ ] DronaCharya repo cloned on **both** laptop and Jetson
+- [ ] `pip install -r requirements.txt` run on both
+- [ ] `pip install MAVProxy` on Jetson (for UART→UDP bridge)
+- [ ] Python 3.9+ on both machines
 
 ---
 
-## 4. Scenario B — SiK Telemetry Radio
+## 4. Channel 1 — Jetson↔Pixhawk via UART (MAVLink)
 
-Use this when the drone is **airborne** or out of Wi-Fi range. SiK radios (e.g., RFD900, 3DR 915 MHz) create a transparent serial-over-radio link.
+DronaCharya's `main.py` needs to communicate with the Pixhawk flight controller over MAVLink. Since the Pixhawk is connected to the Jetson via UART, we use **MAVProxy on the Jetson** to bridge the serial UART into a local UDP connection that pymavlink can consume.
 
-### How SiK Radio Fits In
-
-```
-Laptop USB          Radio Link          Drone USB
-   │                                        │
-[GCS Radio] ═══════════════════════════ [Drone Radio]
-   │ (serial/COM port)                      │ (serial/UART on Jetson)
-   ▼                                        ▼
-[UDP ←→ Serial bridge]              [UDP ←→ Serial bridge]
-(MAVProxy or socat)                 (MAVProxy or socat)
-```
-
-SiK radios appear as **virtual COM/serial ports**. You need a bridge to forward UDP packets (which the GCS app uses) through the radio serial port.
-
----
-
-### Step 4A — Identify the COM port (Laptop)
-
-1. Plug in the SiK radio USB dongle to your laptop.
-2. Open **Device Manager** → **Ports (COM & LPT)**.
-3. Note the COM port, e.g., `COM5`.
-
-Alternatively in PowerShell:
-```powershell
-Get-WMIObject Win32_SerialPort | Select-Object Name, DeviceID
-```
-
-### Step 4B — Identify the serial port (Jetson Nano)
-
-On the Jetson:
-```bash
-ls /dev/ttyUSB* /dev/ttyACM*
-# Usually: /dev/ttyUSB0  or  /dev/ttyACM0
-```
-
-### Step 4C — Install the bridge tool (both sides)
-
-We use **MAVProxy** to bridge UDP ↔ serial. Install it:
+### Step 1 — Find the UART device on Jetson
 
 ```bash
-# On both laptop (PowerShell) and Jetson (bash)
-pip install MAVProxy
+ls /dev/ttyTHS*   # Jetson native UART header pins
+ls /dev/ttyUSB*   # USB-serial adapters
+ls /dev/ttyACM*   # USB ACM devices
 ```
 
-### Step 4D — Run the bridge on the Jetson Nano (drone side)
+Most common: `/dev/ttyTHS1` for Jetson native UART header.
+
+### Step 2 — Grant serial port access
+
+```bash
+sudo usermod -aG dialout $USER
+# Log out and back in for this to take effect
+# Test immediately without logout:
+sudo chmod a+rw /dev/ttyTHS1
+```
+
+### Step 3 — Run MAVProxy bridge on Jetson
+
+This bridges Pixhawk's UART serial stream into a local UDP port (14550) that DronaCharya reads:
 
 ```bash
 mavproxy.py \
-  --master=/dev/ttyUSB0,57600 \
-  --out=udp:127.0.0.1:14560 \
-  --out=udp:127.0.0.1:14561 \
+  --master=/dev/ttyTHS1,57600 \
+  --out=udp:127.0.0.1:14550 \
   --daemon
 ```
 
-> **Explanation:**  
-> `--master` = the radio's serial port at 57600 baud  
-> `--out` = forward received packets to the DronaCharya app on localhost  
-> `--daemon` = run in background
+**Parameters:**
+| Parameter | Meaning |
+|-----------|---------|
+| `--master=/dev/ttyTHS1,57600` | Read from UART at 57600 baud (must match Pixhawk TELEM2 baud) |
+| `--out=udp:127.0.0.1:14550` | Forward to localhost port 14550 (what DronaCharya connects to) |
+| `--daemon` | Run in background |
 
-### Step 4E — Run the bridge on your Laptop (GCS side)
+### Step 4 — Set Pixhawk TELEM2 baud rate
 
-```powershell
-mavproxy.py `
-  --master=COM5,57600 `
-  --out=udp:127.0.0.1:14561 `
-  --daemon
+In **QGroundControl** or **Mission Planner**, set:
+```
+SERIAL2_BAUD = 57   (means 57600 baud)
+SERIAL2_PROTOCOL = 2  (MAVLink 2)
 ```
 
-> Replace `COM5` with your actual COM port and `57600` with the baud rate the radios are configured to (default is 57600 for SiK).
+> `TELEM2` corresponds to `SERIAL2` in Pixhawk parameters.  
+> `TELEM1` is used by the SiK radio.
 
-### Step 4F — Update `config.yaml` for radio mode
-
-Since MAVProxy bridges the radio to **localhost**, both sides talk to `127.0.0.1`:
-
-**On the Jetson Nano** `config/config.yaml`:
-```yaml
-telemetry:
-  command_host: "0.0.0.0"
-  command_port: 14560
-  gcs_host: "127.0.0.1"      # MAVProxy bridge is local
-  gcs_port: 14561
-```
-
-**In the GCS app** (or via config):
-```
-Drone Host  →  127.0.0.1    (MAVProxy on laptop forwards to radio)
-Command Port → 14560
-Listen Port  → 14561
-```
-
-### Step 4G — Check radio link quality
-
-On the laptop, open a second PowerShell and connect to MAVProxy's interactive console:
-```powershell
-mavproxy.py --master=COM5,57600
-```
-Type `link` and press Enter. You should see:
-
-```
-1 links
-link 1 OK
-```
-
-The status display will show **RSSI** (signal strength). Aim for RSSI > 150 for reliable operation.
-
-✅ **Checkpoint B**: MAVProxy says `link 1 OK` on both sides and RSSI is stable.
+✅ **Checkpoint 4**: Run `mavproxy.py --master=/dev/ttyTHS1,57600` — you should see heartbeat messages scrolling.
 
 ---
 
-## 5. Configuring `config.yaml` on Both Sides
+## 5. Channel 2 — GCS Laptop↔Jetson via Wi-Fi (DronaCharya UDP)
 
-This is the **master checklist** for both scenarios. `config/config.yaml` lives in the project root on each machine.
+This is how your `gcs_app.py` talks to DronaCharya running on the Jetson.
 
-```yaml
-# ── Telemetry block (most important for connection) ──────────────────────
-telemetry:
-  command_host: "0.0.0.0"        # Drone always binds to all interfaces
-  command_port: 14560             # GCS sends commands TO this port on the drone
-  gcs_host: "<LAPTOP_IP>"        # Drone sends telemetry TO this IP (Scenario A)
-                                  # Use "127.0.0.1" when using radio bridge (Scenario B)
-  gcs_port: 14561                 # Drone sends telemetry to this port
+### Step 1 — Get the Jetson's IP address
 
-# ── Mission block ────────────────────────────────────────────────────────
-mission:
-  mavlink_connection: "udp:127.0.0.1:14550"   # MAVLink to flight controller
-  mavlink_baudrate: 57600
-  default_altitude_m: 15.0
-  home_latitude: null             # Set these before a real flight!
-  home_longitude: null
-
-# ── Camera block ─────────────────────────────────────────────────────────
-camera:
-  stream_url: ""                  # e.g. "rtsp://192.168.1.42:8554/stream"
-                                  # Leave blank to use local webcam (device_id: 0)
-```
-
----
-
-## 6. Starting the Drone-Side App (Jetson Nano)
-
-SSH into the Jetson Nano from your laptop:
-```powershell
-ssh user@192.168.1.42
-```
-
-Then start DronaCharya:
+**On the Jetson Nano:**
 ```bash
-cd ~/DronaCharya
-python main.py
+hostname -I
+# Example: 192.168.1.42
 ```
 
-**Expected startup output:**
+**Verify from your laptop:**
+```powershell
+ping 192.168.1.42
 ```
-INFO  Telemetry server online
-INFO  Command listener started on 0.0.0.0:14560
-INFO  MAVLink connection initialised
-INFO  DronaCharya ready — waiting for GCS commands
+You must get replies before proceeding.
+
+### Step 2 — Edit `config.yaml` on the Jetson
+
+```yaml
+telemetry:
+  command_host: "0.0.0.0"          # Listens on all interfaces — do not change
+  command_port: 14560               # GCS sends commands to this port
+  gcs_host: "192.168.1.XX"         # ← Replace with YOUR LAPTOP'S Wi-Fi IP
+  gcs_port: 14561                   # Drone sends telemetry back to this port
 ```
 
-> **Tip**: Run it inside a `tmux` session so it survives SSH disconnects:  
-> ```bash
-> tmux new -s drone
-> python main.py
-> # Detach with Ctrl+B, then D
-> ```
+**Find your laptop's Wi-Fi IP:**
+```powershell
+ipconfig
+# Look for: "IPv4 Address" under "Wireless LAN adapter Wi-Fi"
+# Example: 192.168.1.10
+```
 
-✅ **Checkpoint 6**: The Jetson output shows `Command listener started on 0.0.0.0:14560`.
+### Step 3 — Open firewall on Windows (laptop)
 
----
+```powershell
+# Run PowerShell as Administrator
+New-NetFirewallRule -DisplayName "DronaCharya Telemetry IN" `
+  -Direction Inbound -Protocol UDP -LocalPort 14561 -Action Allow
 
-## 7. Starting the GCS App on Your Laptop
+New-NetFirewallRule -DisplayName "DronaCharya Commands OUT" `
+  -Direction Outbound -Protocol UDP -RemotePort 14560 -Action Allow
+```
+
+### Step 4 — Launch GCS app on laptop
 
 ```powershell
 cd C:\Users\LENOVO\Documents\college\Hackathons\Cognizance\DronaCharya
 python gcs/gcs_app.py
 ```
 
-The **dronAcharya GCS** window appears.
+Fill in the **Telemetry Link** fields:
 
-### Fill in the connection fields
-
-| Field | Scenario A (Wi-Fi) | Scenario B (Radio) |
-|-------|--------------------|--------------------|
-| **Drone Host** | `192.168.1.42` (Jetson IP) | `127.0.0.1` |
-| **Command Port** | `14560` | `14560` |
-| **Listen Port** | `14561` | `14561` |
+| Field | Value |
+|-------|-------|
+| **Drone Host** | `192.168.1.42` (Jetson's Wi-Fi IP) |
+| **Command Port** | `14560` |
+| **Listen Port** | `14561` |
 
 Click **Connect**.
 
-✅ **Checkpoint 7**: The **Status** field changes to `CONNECTED` and you see `[TX] STATUS_REQUEST` in the Telemetry Feed log.
+✅ **Checkpoint 5**: Telemetry Feed shows `[TX] STATUS_REQUEST` followed by `[RX:192.168.1.42:...] STATUS: {...}`.
 
 ---
 
-## 8. Verifying the Connection is Live
+## 6. Channel 2 (Alt) — GCS Laptop↔Jetson via SiK Radio + Serial Bridge
 
-After clicking **Connect**, the GCS automatically sends a `STATUS_REQUEST` command.
+> ⚠️ **Use this only if Wi-Fi is unavailable.** It's complex and the SiK radio is already carrying Pixhawk MAVLink — you'd be running two streams through it simultaneously using MAVProxy multiplexing.
 
-### What to look for in the Telemetry Feed log
+### How it works
+
+MAVProxy can output to multiple destinations simultaneously. On the Jetson, instead of only forwarding to `127.0.0.1:14550`, we add a second output back through the radio to the laptop:
+
+**On the Jetson Nano:**
+```bash
+mavproxy.py \
+  --master=/dev/ttyTHS1,57600 \
+  --out=udp:127.0.0.1:14550 \
+  --out=udp:LAPTOP_IP:14561 \
+  --daemon
+```
+
+**On the Laptop:**
+```powershell
+mavproxy.py `
+  --master=COM5,57600 `
+  --out=udp:127.0.0.1:14560 `
+  --daemon
+```
+
+Then set `Drone Host = 127.0.0.1` in the GCS app — MAVProxy on the laptop forwards to/from the radio.
+
+> ⚠️ **Caveat**: DronaCharya commands (`START_MAPPING`, etc.) are **not** MAVLink packets. They are raw plaintext UDP. MAVProxy only bridges MAVLink. This approach only works if you set up `socat` (serial pipe tool) rather than MAVProxy for the DronaCharya channel.
+
+**Recommended**: Use Wi-Fi (Section 5) for DronaCharya commands. Use the SiK radio only for Pixhawk MAVLink.
+
+---
+
+## 7. config.yaml — Full Reference for This Setup
+
+Below is the complete `config/config.yaml` for the **Jetson Nano** with UART-connected Pixhawk:
+
+```yaml
+camera:
+  device_id: 0
+  stream_url: ""                      # Set to RTSP URL if using IP camera on drone
+  capture_count: 24
+  capture_interval_sec: 0.25
+  frame_width: 1280
+  frame_height: 720
+
+mapping:
+  max_dimension: 1600
+  meters_per_pixel: 0.05
+
+vision:
+  model_path: "models/target_yolo.pt"
+  conf_threshold: 0.35
+  target_class_name: "target"
+  image_size: 640
+
+mission:
+  default_altitude_m: 15.0
+  hover_time_sec: 5
+  # MAVLink to Pixhawk via local MAVProxy bridge (UART → UDP)
+  mavlink_connection: "udp:127.0.0.1:14550"
+  mavlink_baudrate: 57600
+  home_latitude: 28.6139            # ← Set your actual launch site coords!
+  home_longitude: 77.2090
+  max_mission_duration_sec: 900
+
+telemetry:
+  command_host: "0.0.0.0"           # Listen on all interfaces
+  command_port: 14560               # GCS sends commands here
+  gcs_host: "192.168.1.10"         # ← Your LAPTOP's Wi-Fi IP
+  gcs_port: 14561                   # GCS listens for telemetry here
+
+logging:
+  level: "INFO"
+  file_name: "dronacharya.log"
+```
+
+> **If connecting directly via serial (no MAVProxy bridge), change:**
+> ```yaml
+> mission:
+>   mavlink_connection: "/dev/ttyTHS1"   # Direct UART to Pixhawk
+>   mavlink_baudrate: 57600
+> ```
+
+---
+
+## 8. Starting Everything — Boot Order Matters
+
+Follow this exact order to avoid race conditions:
 
 ```
-[TX] STATUS_REQUEST
-[RX:192.168.1.42:PORT] STATUS: {'state': 'IDLE', 'mission_active': False, ...}
+Step 1 ──► Power on Pixhawk (wait for arming tones / LED solid)
+Step 2 ──► Boot Jetson Nano, SSH in from laptop
+Step 3 ──► On Jetson: Start MAVProxy bridge (UART → UDP 14550)
+Step 4 ──► On Jetson: Start DronaCharya main app
+Step 5 ──► On Laptop: Plug in SiK USB dongle (optional: open QGC)
+Step 6 ──► On Laptop: Start gcs_app.py and click Connect
 ```
 
-- `[TX]` = packet sent from your laptop to the drone
-- `[RX:IP:PORT]` = telemetry packet received back from the drone
-
-If you see both lines, **the bidirectional link is working**.
-
-### Manual link test from terminal
-
-You can also test without the GUI. Open a second PowerShell:
+### SSH into Jetson from your laptop
 
 ```powershell
-# Send a raw STATUS_REQUEST to the drone
-echo "STATUS_REQUEST" | nc -u 192.168.1.42 14560
-
-# Or using Python one-liner:
-python -c "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.sendto(b'STATUS_REQUEST', ('192.168.1.42', 14560))"
+ssh username@192.168.1.42
+# Replace username with your Jetson user (default is often 'jetson' or 'ubuntu')
 ```
 
-And listen for replies on port 14561:
+### Step 3 — MAVProxy bridge on Jetson
+
+```bash
+# Use tmux so it keeps running after SSH closes
+tmux new -s mavbridge
+mavproxy.py --master=/dev/ttyTHS1,57600 --out=udp:127.0.0.1:14550 --daemon
+# Detach: Ctrl+B, then D
+```
+
+### Step 4 — DronaCharya main app on Jetson
+
+```bash
+tmux new -s drone
+cd ~/DronaCharya
+python main.py
+# Expected output:
+# INFO  Command listener started on 0.0.0.0:14560
+# INFO  Telemetry server online → 192.168.1.10:14561
+# INFO  MAVLink connection initialised
+```
+
+### Step 6 — GCS app on Laptop
+
 ```powershell
-# Listen for incoming telemetry packets
+cd C:\Users\LENOVO\Documents\college\Hackathons\Cognizance\DronaCharya
+python gcs/gcs_app.py
+```
+
+Set Drone Host to `192.168.1.42`, ports `14560`/`14561`, click **Connect**.
+
+---
+
+## 9. Verifying the Connection End-to-End
+
+### Full end-to-end check
+
+Open **two PowerShell windows** on your laptop:
+
+**Window 1 — Listen for drone telemetry:**
+```powershell
 python -c "
-import socket
+import socket, json
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.bind(('0.0.0.0', 14561))
+s.settimeout(10)
 print('Listening on :14561 ...')
 while True:
-    data, addr = s.recvfrom(4096)
-    print(f'From {addr}: {data.decode()}')
+    try:
+        data, addr = s.recvfrom(4096)
+        pkt = json.loads(data.decode())
+        print(f'[RX from {addr[0]}] {pkt[\"type\"]}: {pkt[\"payload\"]}')
+    except socket.timeout:
+        print('Timeout — no data received')
+        break
 "
 ```
 
----
+**Window 2 — Send a STATUS_REQUEST:**
+```powershell
+python -c "
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.sendto(b'STATUS_REQUEST', ('192.168.1.42', 14560))
+print('[TX] STATUS_REQUEST sent')
+s.close()
+"
+```
 
-## 9. Sending Mission Commands
+**Expected output in Window 1:**
+```
+Listening on :14561 ...
+[RX from 192.168.1.42] STATUS: {'state': 'IDLE', 'mission_active': False}
+```
 
-Once connected, the **Mission Commands** toolbar contains all available commands:
+### Verify MAVLink to Pixhawk (on Jetson)
 
-| Button | UDP Payload | What It Does |
-|--------|-------------|--------------|
-| Start Mapping | `START_MAPPING` | Begins autonomous photogrammetry sweep |
-| Run Detection | `RUN_DETECTION` | Runs YOLOv8 target detection on captured frames |
-| Plan Route | `PLAN_ROUTE` | Computes optimal path to detected targets |
-| Start Mission | `START_MISSION` | Arms motors and executes planned route |
-| Abort | `ABORT` | Emergency stop — drone returns to home |
-| Status Request | `STATUS_REQUEST` | Polls drone state (auto-sent on connect) |
-| ▶ Start Recording | `START_RECORDING` | Starts video recording on the drone |
-| ■ Stop Recording | `STOP_RECORDING` | Stops recording |
+```bash
+python3 -c "
+from pymavlink import mavutil
+m = mavutil.mavlink_connection('udp:127.0.0.1:14550')
+m.wait_heartbeat(timeout=10)
+print(f'Heartbeat from system {m.target_system}, component {m.target_component}')
+"
+```
 
-> ⚠️ **Before sending `START_MISSION`**, ensure `home_latitude` and `home_longitude` are set in `config.yaml` on the Jetson. The drone needs a home point to return to on abort/completion.
+Expected: `Heartbeat from system 1, component 1`
 
 ---
 
 ## 10. Debug Tips & Troubleshooting
 
-### 10.1 Windows Firewall Blocking UDP
+### 10.1 No telemetry reply from Jetson (link is down)
 
-**Symptom**: `[RX]` messages never appear even though the drone is running.
+**Checklist:**
+1. Is Jetson's `main.py` actually running? On Jetson: `tmux ls` → attach with `tmux a -t drone`
+2. Are both on the same Wi-Fi subnet? (`192.168.1.x` on both sides)
+3. Windows Firewall — run the firewall rules from §5 Step 3
+4. Is `gcs_host` in `config.yaml` set to your **laptop's** IP (not the Jetson's)?
 
-**Fix**: Open an elevated PowerShell and run:
+**Quick test from laptop:**
 ```powershell
-# Allow inbound UDP on the GCS listen port
-New-NetFirewallRule -DisplayName "DronaCharya GCS Telemetry" `
-  -Direction Inbound -Protocol UDP -LocalPort 14561 -Action Allow
-
-# Allow outbound UDP on command port (usually open by default)
-New-NetFirewallRule -DisplayName "DronaCharya GCS Commands" `
-  -Direction Outbound -Protocol UDP -RemotePort 14560 -Action Allow
+# Check if Jetson port 14560 is reachable
+Test-NetConnection -ComputerName 192.168.1.42 -Port 14560
+# Note: UDP can't be probed with TCP test — use the Python script in §9 instead
 ```
 
-Alternatively, temporarily disable the firewall to test:
+---
+
+### 10.2 MAVProxy says "no heartbeat" from Pixhawk UART
+
+**Symptom:** `mavproxy.py --master=/dev/ttyTHS1,57600` shows `Waiting for heartbeat...` indefinitely.
+
+**Checklist:**
+1. **Baud rate mismatch** — Pixhawk `SERIAL2_BAUD` must match MAVProxy baud:
+   - In QGC: Parameters → `SERIAL2_BAUD` → set to `57` (= 57600)
+2. **Wrong UART device** — try `/dev/ttyTHS0` instead of `/dev/ttyTHS1`
+3. **TX/RX crossed** — Pixhawk TX → Jetson RX (not TX→TX). Swap the wires if no heartbeat
+4. **Pixhawk not fully booted** — wait for the solid green LED before connecting
+5. **Serial protocol not set** — `SERIAL2_PROTOCOL` must be `2` (MAVLink 2)
+
+---
+
+### 10.3 Enabling UART on Jetson Nano
+
+The Jetson Nano's hardware UART (`/dev/ttyTHS1`) may be in use by the serial console by default.
+
+**Disable serial console to free UART:**
+```bash
+sudo systemctl stop nvgetty
+sudo systemctl disable nvgetty
+sudo udevadm trigger
+```
+
+Then verify the device exists and is accessible:
+```bash
+ls -la /dev/ttyTHS1
+sudo chmod a+rw /dev/ttyTHS1
+```
+
+---
+
+### 10.4 Windows Firewall Blocking UDP
+
 ```powershell
+# Elevated PowerShell (Run as Administrator)
+
+# Allow inbound telemetry
+New-NetFirewallRule -DisplayName "DronaCharya Telemetry IN" `
+  -Direction Inbound -Protocol UDP -LocalPort 14561 -Action Allow
+
+# Temporarily disable all firewalls to test:
 Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
-# Remember to re-enable after testing!
+# Test your connection, then re-enable:
 Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True
 ```
 
 ---
 
-### 10.2 Port Already In Use
+### 10.5 Port 14561 Already In Use on Laptop
 
-**Symptom**: GCS shows `[ERROR] Telemetry listener error: [WinError 10048] Only one usage of each socket address`
-
-**Fix**: Another process is holding port 14561. Find and kill it:
 ```powershell
-# Find what's using port 14561
+# Find what process is using it
 netstat -ano | findstr :14561
 
-# Kill the process by PID (replace 12345)
+# Kill by PID (replace 12345)
 Stop-Process -Id 12345 -Force
 ```
-Then click **Connect** again.
 
 ---
 
-### 10.3 Drone Not Receiving Commands
+### 10.6 `gcs_app.py` Crashes — ModuleNotFoundError
 
-**Symptom**: `[TX]` appears in the GCS log, but the Jetson shows nothing.
-
-**Checklist:**
-1. Is the **Drone Host** IP correct? Double-check with `ping`.
-2. Is the Jetson's firewall blocking port 14560?
-   ```bash
-   # On Jetson, temporarily disable ufw:
-   sudo ufw disable
-   # Then test; re-enable after: sudo ufw enable
-   ```
-3. Are you on the **same subnet**? (e.g., both on `192.168.1.x`)
-4. For radio scenario: Is MAVProxy running on **both** sides? Check with:
-   ```bash
-   ps aux | grep mavproxy
-   ```
-
----
-
-### 10.4 Telemetry Feed Shows `[DISCONNECTED]`
-
-**Symptom**: After connecting, the status flips back to `DISCONNECTED`.
-
-**Cause**: The listener thread crashed because it couldn't bind port 14561.
-
-**Fix**: See [§10.2](#102-port-already-in-use). Also check logs in `dronacharya.log` on the Jetson for the drone-side view:
-```bash
-tail -f ~/DronaCharya/dronacharya.log
-```
-
----
-
-### 10.5 Radio RSSI is Poor / Dropping
-
-**Symptom**: Commands are intermittent or lost; RSSI in MAVProxy is < 100.
-
-**Fixes (in order of ease):**
-1. **Antenna orientation** — keep antennas vertical (upright), not horizontal.
-2. **Distance** — SiK 915 MHz: up to ~1 km line-of-sight. Ensure no concrete walls between devices.
-3. **Interference** — 915 MHz can conflict with other ISM-band devices. Try switching the radio's channel in MAVProxy:
-   ```
-   param set SYSID_THISMAV 1
-   param set RC_CHANNEL 5
-   ```
-4. **Baud rate mismatch** — both radios must use the **same baud rate**. Check via `mavproxy.py --master=COM5,57600` and run `link`.
-
----
-
-### 10.6 Commands Sent But Drone Ignores Them
-
-**Symptom**: Jetson receives the command (visible in logs) but nothing happens.
-
-**Cause**: The drone may be in a state that doesn't accept that command (e.g., `START_MISSION` while mapping is still running).
-
-**Fix**: Check the state machine via `STATUS_REQUEST`. The telemetry feed will show:
-```
-STATUS: {'state': 'MAPPING', 'mission_active': True, ...}
-```
-Wait for the current task to complete, or send `ABORT` first, then retry.
-
----
-
-### 10.7 `gcs_app.py` Crashes on Import
-
-**Symptom**: `ModuleNotFoundError: No module named 'utils'`
-
-**Fix**: Always run from the **project root**, not from inside the `gcs/` folder:
+Always run from the **project root**:
 ```powershell
 # ✅ Correct
 cd C:\Users\LENOVO\Documents\college\Hackathons\Cognizance\DronaCharya
 python gcs/gcs_app.py
 
 # ❌ Wrong
-cd gcs
-python gcs_app.py
+cd gcs && python gcs_app.py
 ```
 
 ---
 
-### 10.8 Connection Verification Cheat Sheet
+### 10.7 SiK Radio Not Appearing on Laptop (No COM Port)
 
-Run this quick diagnostic script from your laptop to verify all paths:
+1. Try a different USB port
+2. Check Device Manager → look for "USB Serial Device" with a yellow `!`
+3. Install CP210x or FTDI drivers (depending on your radio's USB chip):
+   - SiK 3DR/Holybro: usually CP210x → https://www.silabs.com/developers/usb-to-uart-bridge-vcp-drivers
+4. Verify in PowerShell:
+   ```powershell
+   Get-WMIObject Win32_SerialPort | Select-Object Name, DeviceID
+   ```
+
+---
+
+### 10.8 DronaCharya Receives Command But Ignores It
+
+The drone may already be in an active state. Send `STATUS_REQUEST` first and read the state from the Telemetry Feed:
+
+```
+STATUS: {'state': 'MAPPING', 'mission_active': True, ...}
+```
+
+Valid state transitions — you must `ABORT` before issuing conflicting commands.
+
+---
+
+### 10.9 Quick Diagnostic Cheat Sheet
 
 ```powershell
-# Save as check_link.ps1 and run from the project root
+# Run this from laptop to test the full DronaCharya UDP path
 python -c "
-import socket, time, json
-
-DRONE_IP   = '192.168.1.42'   # Change to your Jetson IP
-CMD_PORT   = 14560
-TELEM_PORT = 14561
-
-# Open a listener first
-recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-recv_sock.bind(('0.0.0.0', TELEM_PORT))
-recv_sock.settimeout(5)
-
-# Send STATUS_REQUEST
-send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-send_sock.sendto(b'STATUS_REQUEST', (DRONE_IP, CMD_PORT))
-print(f'[TX] STATUS_REQUEST -> {DRONE_IP}:{CMD_PORT}')
-
-# Wait for reply
+import socket, json, time
+JETSON = '192.168.1.42'  # ← change this
+rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+rx.bind(('0.0.0.0', 14561))
+rx.settimeout(5)
+tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+tx.sendto(b'STATUS_REQUEST', (JETSON, 14560))
+print(f'[TX] STATUS_REQUEST → {JETSON}:14560')
 try:
-    data, addr = recv_sock.recvfrom(4096)
-    pkt = json.loads(data.decode())
-    print(f'[RX] {pkt[\"type\"]}: {pkt[\"payload\"]}')
-    print('✅ Link is UP')
+    d, a = rx.recvfrom(4096)
+    p = json.loads(d)
+    print(f'[RX] {p[\"type\"]}: {p[\"payload\"]}')
+    print('✅  DronaCharya link UP')
 except socket.timeout:
-    print('❌ No reply — link is DOWN')
+    print('❌  No reply — check Jetson main.py is running and IPs match')
 finally:
-    recv_sock.close()
-    send_sock.close()
+    rx.close(); tx.close()
 "
 ```
 
@@ -533,20 +565,23 @@ finally:
 ## Quick Reference Card
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  DronaCharya Connection Quick Reference                      │
-├──────────────────────┬──────────────────────────────────────┤
-│ GCS app start        │ python gcs/gcs_app.py                │
-│ Drone app start      │ python main.py  (on Jetson)          │
-│ Command port         │ 14560  (drone listens)               │
-│ Telemetry port       │ 14561  (laptop listens)              │
-│ Protocol             │ UDP (no handshake)                   │
-│ Config file          │ config/config.yaml                   │
-│ Log file (drone)     │ dronacharya.log                      │
-├──────────────────────┼──────────────────────────────────────┤
-│ Test send (laptop)   │ python -c "import socket; ..."       │
-│ Port check (Windows) │ netstat -ano | findstr :14561        │
-│ Radio bridge         │ mavproxy.py --master=COM5,57600      │
-│ Radio RSSI check     │ MAVProxy console → type: link        │
-└──────────────────────┴──────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                 DronaCharya Connection Quick Reference                    │
+├────────────────────────────────┬─────────────────────────────────────────┤
+│ CHANNEL 1 — MAVLink (FC)       │ CHANNEL 2 — DronaCharya Commands        │
+├────────────────────────────────┼─────────────────────────────────────────┤
+│ Path: SiK radio ↔ Pixhawk     │ Path: Wi-Fi  Laptop ↔ Jetson            │
+│       ↔ UART ↔ Jetson          │                                          │
+│ Port: 14550 (MAVLink std)      │ Cmd port:  14560 (drone listens)        │
+│ Bridge: mavproxy on Jetson     │ Telem port: 14561 (laptop listens)      │
+│ Device: /dev/ttyTHS1, 57600   │ Protocol: plaintext UDP                  │
+├────────────────────────────────┼─────────────────────────────────────────┤
+│ Start drone app    │ ssh → tmux → python main.py                         │
+│ Start MAVProxy     │ mavproxy.py --master=/dev/ttyTHS1,57600             │
+│                    │   --out=udp:127.0.0.1:14550 --daemon                │
+│ Start GCS app      │ python gcs/gcs_app.py  (from project root)          │
+│ Drone Host field   │ 192.168.1.42  (Jetson Wi-Fi IP)                     │
+│ Config file        │ config/config.yaml  (edit on Jetson)                │
+│ Log file (drone)   │ dronacharya.log                                      │
+└────────────────────────────────┴─────────────────────────────────────────┘
 ```
