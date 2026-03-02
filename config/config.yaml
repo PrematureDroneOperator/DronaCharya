@@ -8,16 +8,18 @@ camera:
   # Use a GStreamer pipeline in stream_url to force proper format conversion.
   device_id: 0
 
-  # ── Active source: GStreamer v4l2src pipeline ─────────────────────────────
-  # This correctly decodes YUYV → BGR and eliminates green frames.
-  # Change /dev/video0 → /dev/video1 if you want the second camera.
-  stream_url: "v4l2src device=/dev/video0 ! video/x-raw,width=1280,height=720,framerate=30/1 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=1"
+  # ── Active source ─────────────────────────────────────────────────────────
+  # Blank = use device_id above (recommended — recorder forces MJPG capture
+  # automatically to avoid green frames, no GStreamer pipeline needed).
+  stream_url: ""
 
-  # Other options (uncomment to switch):
-  #   Second USB cam:
-  #     stream_url: "v4l2src device=/dev/video1 ! video/x-raw,width=1280,height=720,framerate=30/1 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=1"
-  #   Camera resolution auto-detect (safer if 1280x720 fails):
+  # GStreamer pipeline alternatives (only needed if device_id fails entirely):
+  #   Auto-detect resolution (safe):
   #     stream_url: "v4l2src device=/dev/video0 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=1"
+  #   Fixed resolution (only if camera actually supports raw 1280x720 YUY2):
+  #     stream_url: "v4l2src device=/dev/video0 ! video/x-raw,width=1280,height=720,framerate=30/1 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=1"
+  #   Second USB cam:
+  #     Change device_id to 1, or swap /dev/video0 → /dev/video1 in the pipeline
   #   CSI camera (IMX219 / IMX477):
   #     stream_url: "nvarguscamerasrc sensor-id=0 ! video/x-raw(memory:NVMM),width=1280,height=720,framerate=30/1 ! nvvidconv ! video/x-raw,format=BGRx ! videoconvert ! video/x-raw,format=BGR ! appsink drop=1"
   #   RTSP stream:

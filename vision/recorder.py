@@ -92,6 +92,12 @@ class DroneRecorder:
                 "v4l2src GStreamer pipeline instead (see config/config.yaml).".format(self._source)
             )
 
+        # For plain device-index sources, force the camera to output MJPEG.
+        # This avoids the green-frame problem when the camera's native format
+        # is YUYV — OpenCV decodes MJPEG to BGR correctly without GStreamer.
+        if isinstance(self._source, int):
+            self._cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+
         self._cap.set(cv2.CAP_PROP_FPS, self.fps)
 
         width = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
