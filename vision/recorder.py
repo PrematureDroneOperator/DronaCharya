@@ -49,7 +49,7 @@ class DroneRecorder:
         source: Union[int, str] = 0,
         fps: int = 30,
         output_dir: Union[str, Path] = "recordings",
-        fourcc: str = "XVID",
+        fourcc: str = "MJPG",
         container: str = ".avi",
         auto_extract: bool = True,
     ) -> None:
@@ -60,7 +60,7 @@ class DroneRecorder:
 
         self.fps = fps
         self.output_dir = Path(output_dir)
-        # Normalise the fourcc (must be exactly 4 chars) and container.
+        # Normalise fourcc (must be exactly 4 chars) and container.
         self.fourcc = fourcc.strip()
         self.container = container.strip() if container.startswith(".") else f".{container.strip()}"
         self.auto_extract = auto_extract
@@ -71,10 +71,26 @@ class DroneRecorder:
         self._video_path = None  # type: Optional[Path]
         self._recording = False
 
+    @property
+    def _is_gst_pipeline(self) -> bool:
+        """True when source is a GStreamer pipeline string (not a device index)."""
+        return isinstance(self._source, str) and not self._source.startswith(("rtsp://", "http://", "https://"))
+
     def start(self) -> None:
-        self._cap = cv2.VideoCapture(self._source)
+        # Use the GStreamer backend explicitly for pipeline strings so OpenCV
+        # does not fall back to V4L2 raw capture (which gives green frames when
+        # the camera's native pixel format isn't plain BGR).
+        if self._is_gst_pipeline:
+            self._cap = cv2.VideoCapture(self._source, cv2.CAP_GSTREAMER)
+        else:
+            self._cap = cv2.VideoCapture(self._source)
+
         if not self._cap.isOpened():
-            raise RuntimeError("Cannot open camera source: {!r}".format(self._source))
+            raise RuntimeError(
+                "Cannot open camera source: {!r}\n"
+                "  Hint: if you see green frames with device_id, set stream_url to a "
+                "v4l2src GStreamer pipeline instead (see config/config.yaml).".format(self._source)
+            )
 
         self._cap.set(cv2.CAP_PROP_FPS, self.fps)
 
@@ -90,19 +106,16 @@ class DroneRecorder:
         if not self._writer.isOpened():
             raise RuntimeError(
                 "VideoWriter failed to initialize. "
-                "fourcc={!r} container={!r} — try fourcc=XVID container=.avi".format(
+                "fourcc={!r} container={!r}\n"
+                "  On Jetson try: fourcc=MJPG container=.avi".format(
                     self.fourcc, self.container
                 )
             )
 
         self._recording = True
         logger.info(
-            "Recording started -> %s  [%dx%d @ %d fps]  codec=%s",
-            self._video_path,
-            width,
-            height,
-            self.fps,
-            self.fourcc,
+            "Recording started -> %s  [%dx%d @ %d fps]  codec=%s src=%r",
+            self._video_path, width, height, self.fps, self.fourcc, self._source,
         )
 
     def record_frame(self) -> bool:

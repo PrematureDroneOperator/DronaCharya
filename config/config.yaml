@@ -1,32 +1,35 @@
 camera:
   # ──────────────────────────────────────────────────────────────────────────
-  # CAMERA SOURCE — choose ONE of the options below, leave the others blank.
+  # CAMERA SOURCE
   # ──────────────────────────────────────────────────────────────────────────
-  #
-  # OPTION A — USB / V4L2 webcam  ← /dev/video0 or /dev/video1 confirmed working
-  #   device_id: 0  maps to /dev/video0
-  #   device_id: 1  maps to /dev/video1
+  # device_id is the fallback when stream_url is blank.
+  # On Jetson, cv2.VideoCapture(0) often gives GREEN FRAMES because OpenCV
+  # can't negotiate the camera's native pixel format (YUYV/MJPEG) over V4L2.
+  # Use a GStreamer pipeline in stream_url to force proper format conversion.
   device_id: 0
 
-  # OPTION B — GStreamer pipeline (CSI cameras or V4L2 fallback)
-  #   CSI (IMX219 etc.):
+  # ── Active source: GStreamer v4l2src pipeline ─────────────────────────────
+  # This correctly decodes YUYV → BGR and eliminates green frames.
+  # Change /dev/video0 → /dev/video1 if you want the second camera.
+  stream_url: "v4l2src device=/dev/video0 ! video/x-raw,width=1280,height=720,framerate=30/1 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=1"
+
+  # Other options (uncomment to switch):
+  #   Second USB cam:
+  #     stream_url: "v4l2src device=/dev/video1 ! video/x-raw,width=1280,height=720,framerate=30/1 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=1"
+  #   Camera resolution auto-detect (safer if 1280x720 fails):
+  #     stream_url: "v4l2src device=/dev/video0 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=1"
+  #   CSI camera (IMX219 / IMX477):
   #     stream_url: "nvarguscamerasrc sensor-id=0 ! video/x-raw(memory:NVMM),width=1280,height=720,framerate=30/1 ! nvvidconv ! video/x-raw,format=BGRx ! videoconvert ! video/x-raw,format=BGR ! appsink drop=1"
-  #   USB via explicit GStreamer (use if device_id still fails):
-  #     stream_url: "v4l2src device=/dev/video0 ! video/x-raw,width=1280,height=720,framerate=30/1 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=1"
-  #   RTSP:
+  #   RTSP stream:
   #     stream_url: "rtsp://<jetson-ip>:8554/drone"
-  stream_url: ""   # ← non-empty overrides device_id
 
   # ──────────────────────────────────────────────────────────────────────────
   # VIDEO WRITER SETTINGS
   # ──────────────────────────────────────────────────────────────────────────
-  # On Jetson Nano (L4T OpenCV), mp4v + .mp4 produces a silent empty file.
-  # Use XVID + .avi — it is robustly supported on every OpenCV build.
-  # Available options:
-  #   fourcc: XVID  container: .avi   ← RECOMMENDED for Jetson (default)
-  #   fourcc: mp4v  container: .mp4   ← works on desktop / full FFmpeg builds
-  #   fourcc: avc1  container: .mp4   ← H.264, requires libx264 in OpenCV
-  fourcc: "XVID"
+  # MJPG + .avi  ← works on every Jetson L4T OpenCV build (no extra libs needed)
+  # XVID + .avi  ← requires libxvidcore (often missing on Jetson)
+  # mp4v + .mp4  ← silently writes empty files on Jetson L4T OpenCV
+  fourcc: "MJPG"
   container: ".avi"
 
   # ──────────────────────────────────────────────────────────────────────────
