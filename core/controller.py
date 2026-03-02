@@ -334,6 +334,8 @@ class DroneAcharyaController:
             source=source,
             fps=30,
             output_dir=str(output_dir),
+            fourcc=self.config.camera.fourcc,
+            container=self.config.camera.container,
             auto_extract=True,
         )
         try:

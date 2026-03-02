@@ -49,7 +49,8 @@ class DroneRecorder:
         source: Union[int, str] = 0,
         fps: int = 30,
         output_dir: Union[str, Path] = "recordings",
-        fourcc: str = "mp4v",
+        fourcc: str = "XVID",
+        container: str = ".avi",
         auto_extract: bool = True,
     ) -> None:
         try:
@@ -59,7 +60,9 @@ class DroneRecorder:
 
         self.fps = fps
         self.output_dir = Path(output_dir)
-        self.fourcc = fourcc
+        # Normalise the fourcc (must be exactly 4 chars) and container.
+        self.fourcc = fourcc.strip()
+        self.container = container.strip() if container.startswith(".") else f".{container.strip()}"
         self.auto_extract = auto_extract
 
         self._cap = None  # type: Optional[cv2.VideoCapture]
@@ -79,20 +82,27 @@ class DroneRecorder:
         height = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
 
         self._session_dir = _next_session_dir(self.output_dir)
-        self._video_path = self._session_dir / "recording.mp4"
+        # Use the configured container extension so the codec and container match.
+        self._video_path = self._session_dir / ("recording" + self.container)
 
-        fourcc = cv2.VideoWriter_fourcc(*self.fourcc)
-        self._writer = cv2.VideoWriter(str(self._video_path), fourcc, self.fps, (width, height))
+        fourcc_code = cv2.VideoWriter_fourcc(*self.fourcc)
+        self._writer = cv2.VideoWriter(str(self._video_path), fourcc_code, self.fps, (width, height))
         if not self._writer.isOpened():
-            raise RuntimeError("VideoWriter failed to initialize.")
+            raise RuntimeError(
+                "VideoWriter failed to initialize. "
+                "fourcc={!r} container={!r} — try fourcc=XVID container=.avi".format(
+                    self.fourcc, self.container
+                )
+            )
 
         self._recording = True
         logger.info(
-            "Recording started -> %s  [%dx%d @ %d fps]",
+            "Recording started -> %s  [%dx%d @ %d fps]  codec=%s",
             self._video_path,
             width,
             height,
             self.fps,
+            self.fourcc,
         )
 
     def record_frame(self) -> bool:
@@ -147,11 +157,14 @@ def record_until_stop(
     source: Union[int, str] = 0,
     fps: int = 30,
     output_dir: Union[str, Path] = "recordings",
+    fourcc: str = "XVID",
+    container: str = ".avi",
     show_preview: bool = True,
     stop_key: str = "q",
 ) -> Tuple[Path, Path]:
     """Block and record until stop_key is pressed or source ends."""
-    recorder = DroneRecorder(source=source, fps=fps, output_dir=output_dir)
+    recorder = DroneRecorder(source=source, fps=fps, output_dir=output_dir,
+                             fourcc=fourcc, container=container)
     recorder.start()
     frame_delay_ms = max(1, int(1000 / max(1, fps)))
 

@@ -8,7 +8,9 @@ import yaml
 @dataclass
 class CameraConfig:
     device_id: int = 0
-    stream_url: str = ""          # RTSP / HTTP URL of the drone camera; overrides device_id when set
+    stream_url: str = ""          # RTSP / HTTP URL or GStreamer pipeline; overrides device_id when set
+    fourcc: str = "XVID"          # VideoWriter codec — XVID recommended for Jetson L4T OpenCV
+    container: str = ".avi"       # output file extension matching fourcc (.avi for XVID, .mp4 for mp4v)
     capture_count: int = 24
     capture_interval_sec: float = 0.25
     frame_width: int = 1280

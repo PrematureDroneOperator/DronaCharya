@@ -20,6 +20,7 @@
 10. [Step 7 — Start the GCS App on the Laptop](#10-step-7--start-the-gcs-app-on-the-laptop)
 11. [Verifying the Connection End-to-End](#11-verifying-the-connection-end-to-end)
 12. [Debug Tips & Troubleshooting](#12-debug-tips--troubleshooting)
+13. [Camera Configuration for Recording](#13-camera-configuration-for-recording)
 
 ---
 
@@ -389,6 +390,143 @@ sudo chmod a+rw /dev/ttyUSB0
 
 ---
 
+## 13. Camera Configuration for Recording
+
+> **Why you get** `Cannot open camera source: 0`  
+> `cv2.VideoCapture(0)` tries to open `/dev/video0` as a plain V4L2 device.  
+> On a Jetson Nano, **CSI cameras are not exposed as `/dev/video0`** — they require  
+> a GStreamer pipeline through `nvarguscamerasrc`. USB webcams _are_ V4L2 but may  
+> show up at a different index, or OpenCV may not be built with V4L2 support.
+
+---
+
+### 13.1 Identify connected cameras on the Jetson
+
+```bash
+# List all video devices
+ls /dev/video*
+# Expected output examples:
+#   /dev/video0          → USB webcam (V4L2)
+#   (nothing)            → only a CSI camera is connected
+
+# Detailed info for each device:
+for dev in /dev/video*; do echo "--- $dev ---"; v4l2-ctl --device=$dev --info 2>/dev/null | head -5; done
+
+# Check if a CSI camera is detected by the NVIDIA ISP:
+ls /dev/nvhost-vi*
+# If files appear here, you have a CSI camera (IMX219 / IMX477 etc.)
+```
+
+---
+
+### 13.2 Choose the right source in config.yaml
+
+Edit `config/config.yaml` on the **Jetson** and set **exactly one** of these:
+
+#### Case A — USB webcam (e.g. Logitech, generic)
+
+`/dev/video0` is present in `ls /dev/video*` output:
+
+```yaml
+camera:
+  device_id: 0        # index matching /dev/video0
+  stream_url: ""      # leave blank
+```
+
+If `cv2.VideoCapture(0)` still fails (OpenCV built without V4L2), use a GStreamer pipeline instead:
+
+```yaml
+camera:
+  device_id: 0
+  stream_url: "v4l2src device=/dev/video0 ! video/x-raw,width=1280,height=720,framerate=30/1 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=1"
+```
+
+#### Case B — CSI camera (IMX219 "Raspberry Pi cam v2", IMX477, etc.)
+
+No `/dev/video0`, but `ls /dev/nvhost-vi*` shows files:
+
+```yaml
+camera:
+  device_id: 0
+  stream_url: "nvarguscamerasrc sensor-id=0 ! video/x-raw(memory:NVMM),width=1280,height=720,framerate=30/1 ! nvvidconv ! video/x-raw,format=BGRx ! videoconvert ! video/x-raw,format=BGR ! appsink drop=1"
+```
+
+> `sensor-id=0` is the primary CSI port (J13 on Jetson Nano). Use `sensor-id=1` for the second CSI port.
+
+#### Case C — RTSP stream (using jetson_stream_server.py)
+
+Start the stream server first (see §13.3), then point config.yaml at it:
+
+```yaml
+camera:
+  device_id: 0
+  stream_url: "rtsp://<jetson-ip>:8554/drone"
+```
+
+---
+
+### 13.3 Start the RTSP stream server on the Jetson (optional)
+
+This is only needed if you want to preview the stream on the GCS laptop *and* record it on the Jetson simultaneously, or if you prefer RTSP over a direct pipeline.
+
+```bash
+# Install GStreamer RTSP server (one-time)
+sudo apt install -y gstreamer1.0-tools gstreamer1.0-rtsp \
+                    python3-gi gir1.2-gst-rtsp-server-1.0
+
+# CSI camera
+python3 gcs/jetson_stream_server.py
+
+# USB webcam
+python3 gcs/jetson_stream_server.py --usb --dev /dev/video0
+```
+
+The server prints the exact `stream_url` to paste into `config.yaml`.
+
+---
+
+### 13.4 Quick camera sanity-test (run on Jetson before starting main.py)
+
+```bash
+# Test USB/index source:
+python3 -c "
+import cv2, sys
+cap = cv2.VideoCapture(0)
+if not cap.isOpened(): sys.exit('FAIL: cannot open /dev/video0')
+ok, frame = cap.read()
+print('OK — frame shape:', frame.shape if ok else 'read failed')
+cap.release()
+"
+
+# Test GStreamer CSI pipeline:
+python3 -c "
+import cv2, sys
+pipeline = 'nvarguscamerasrc sensor-id=0 ! video/x-raw(memory:NVMM),width=1280,height=720,framerate=30/1 ! nvvidconv ! video/x-raw,format=BGRx ! videoconvert ! video/x-raw,format=BGR ! appsink drop=1'
+cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+if not cap.isOpened(): sys.exit('FAIL: CSI camera pipeline failed — is nvarguscamerasrc installed?')
+ok, frame = cap.read()
+print('OK — frame shape:', frame.shape if ok else 'read failed')
+cap.release()
+"
+```
+
+✅ **Checkpoint**: You see `OK — frame shape: (720, 1280, 3)` (or similar).  
+Now set `stream_url` in `config.yaml` to the working pipeline and restart `main.py`.
+
+---
+
+### 13.5 Troubleshooting `Cannot open camera source: 0`
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| Both `device_id: 0` fails and `/dev/video0` missing | CSI-only drone cam | Use Case B pipeline in `stream_url` |
+| `/dev/video0` exists but still fails | OpenCV not built with GStreamer/V4L2 | Use V4L2 GStreamer pipeline in `stream_url` |
+| GStreamer pipeline fails | `nvarguscamerasrc` not available | Run `gst-inspect-1.0 nvarguscamerasrc` to confirm; install JetPack if missing |
+| RTSP `stream_url` fails | Server not running or firewall | Confirm `jetson_stream_server.py` is running; `nc -zv <ip> 8554` to test port |
+| Multiple cameras — wrong device | Wrong `device_id` or `sensor-id` | Run `v4l2-ctl --list-devices` and try index 1, 2… |
+
+---
+
 ## Quick Reference Card
 
 ```
@@ -401,12 +539,14 @@ Boot order:
   6. python gcs/gcs_app.py  →  Drone Host: 127.0.0.1 | Cmd: 14560 | Listen: 14561 → Connect
 
 Key files:
-  config/config.yaml          gcs_host: "127.0.0.1"   gcs_port: 14561
-  telemetry/radio_bridge.py   the serial↔UDP bridge (NEW — run on both sides)
+  config/config.yaml          camera.stream_url / camera.device_id  (choose one)
+  telemetry/radio_bridge.py   the serial↔UDP bridge (run on both sides)
   gcs/gcs_app.py              GCS GUI (laptop)
+  gcs/jetson_stream_server.py RTSP server for CSI / USB cam (Jetson only)
   main.py                     DronaCharya entry point (Jetson)
 
 Ports (all localhost after bridging):
   14560  →  DronaCharya command listener
   14561  →  GCS telemetry listener
+  8554   →  RTSP camera stream (jetson_stream_server.py, optional)
 ```

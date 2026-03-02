@@ -1,11 +1,35 @@
 camera:
+  # ──────────────────────────────────────────────────────────────────────────
+  # CAMERA SOURCE — choose ONE of the options below, leave the others blank.
+  # ──────────────────────────────────────────────────────────────────────────
+  #
+  # OPTION A — USB / V4L2 webcam  ← /dev/video0 or /dev/video1 confirmed working
+  #   device_id: 0  maps to /dev/video0
+  #   device_id: 1  maps to /dev/video1
   device_id: 0
-  # Set stream_url to record from the drone camera over the network.
-  # When set, it takes priority over device_id.
-  # Examples:
-  #   rtsp://192.168.1.1:554/stream        (RTSP – most IP cameras / drones)
-  #   http://192.168.1.1:8080/?action=stream (MJPEG HTTP stream)
-  stream_url: ""                           # ← put your drone's URL here
+
+  # OPTION B — GStreamer pipeline (CSI cameras or V4L2 fallback)
+  #   CSI (IMX219 etc.):
+  #     stream_url: "nvarguscamerasrc sensor-id=0 ! video/x-raw(memory:NVMM),width=1280,height=720,framerate=30/1 ! nvvidconv ! video/x-raw,format=BGRx ! videoconvert ! video/x-raw,format=BGR ! appsink drop=1"
+  #   USB via explicit GStreamer (use if device_id still fails):
+  #     stream_url: "v4l2src device=/dev/video0 ! video/x-raw,width=1280,height=720,framerate=30/1 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=1"
+  #   RTSP:
+  #     stream_url: "rtsp://<jetson-ip>:8554/drone"
+  stream_url: ""   # ← non-empty overrides device_id
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # VIDEO WRITER SETTINGS
+  # ──────────────────────────────────────────────────────────────────────────
+  # On Jetson Nano (L4T OpenCV), mp4v + .mp4 produces a silent empty file.
+  # Use XVID + .avi — it is robustly supported on every OpenCV build.
+  # Available options:
+  #   fourcc: XVID  container: .avi   ← RECOMMENDED for Jetson (default)
+  #   fourcc: mp4v  container: .mp4   ← works on desktop / full FFmpeg builds
+  #   fourcc: avc1  container: .mp4   ← H.264, requires libx264 in OpenCV
+  fourcc: "XVID"
+  container: ".avi"
+
+  # ──────────────────────────────────────────────────────────────────────────
   capture_count: 24
   capture_interval_sec: 0.25
   frame_width: 1280
