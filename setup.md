@@ -97,10 +97,19 @@ DronaCharya listens on :14560            gcs_app listens on :14561
 
 ```bash
 cd ~/DronaCharya
+
+# 1. Upgrade build tools (CRITICAL for JetPack 4.5 / Python 3.6)
+pip3 install --upgrade pip setuptools wheel
+
+# 2. Install dependencies
+# If PyYAML fails with 'cython_sources', ensure you've pulled the 
+# latest requirements.txt which pins PyYAML==5.4.1
 pip3 install -r requirements.txt
-# Or install pyserial directly:
-pip3 install pyserial
 ```
+
+> [!TIP]
+> **PyYAML Error?** If you see `AttributeError: cython_sources`, it's because PyYAML 6.0+ is incompatible with the default build tools on JetPack 4.5. The project's `requirements.txt` is now pinned to `5.4.1` to solve this.
+
 
 ### On Laptop (Windows)
 

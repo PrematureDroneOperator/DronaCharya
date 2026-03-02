@@ -1,6 +1,6 @@
 # Jetson Nano base runtime (Python 3.6-compatible)
 # OpenCV and NumPy are expected from JetPack system packages.
-PyYAML>=5.4,<7.0
+PyYAML==5.4.1            # PINNED for Python 3.6 compatibility (fixes cython_sources error)
 pymavlink>=2.4.0
 pyserial>=3.5           # required by telemetry/radio_bridge.py (SiK serial link)
 dataclasses>=0.8; python_version < "3.7"
