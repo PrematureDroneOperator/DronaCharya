@@ -47,7 +47,7 @@ class GCSApp:
         conn = ttk.LabelFrame(frame, text="Telemetry Link", padding=10)
         conn.pack(fill=tk.X, pady=4)
 
-        ttk.Label(conn, text="Drone Host").grid(row=0, column=0, padx=4, pady=2, sticky=tk.W)
+        ttk.Label(conn, text="Bridge Host").grid(row=0, column=0, padx=4, pady=2, sticky=tk.W)
         ttk.Entry(conn, textvariable=self.drone_host, width=18).grid(row=0, column=1, padx=4, pady=2)
         ttk.Label(conn, text="Command Port").grid(row=0, column=2, padx=4, pady=2, sticky=tk.W)
         ttk.Entry(conn, textvariable=self.command_port, width=10).grid(row=0, column=3, padx=4, pady=2)
@@ -138,9 +138,13 @@ class GCSApp:
     def _send_command(self, command: str) -> None:
         host = self.drone_host.get().strip()
         port = int(self.command_port.get())
+        if host not in ("127.0.0.1", "localhost"):
+            self._append_log(
+                "[WARN] Bridge Host is not localhost. For SiK radio bridge mode use 127.0.0.1."
+            )
         try:
             self._send_socket.sendto(command.encode("utf-8"), (host, port))
-            self._append_log(f"[TX] {command}")
+            self._append_log(f"[TX:{host}:{port}] {command}")
         except OSError as exc:
             self._append_log(f"[ERROR] Failed to send {command}: {exc}")
 
