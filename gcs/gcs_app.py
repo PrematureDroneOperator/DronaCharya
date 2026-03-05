@@ -7,10 +7,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import ttk
 
-# ---------------------------------------------------------------------------
-# Make sure the project root is importable when gcs_app.py is run directly
-# (e.g.  python gcs/gcs_app.py)
-# ---------------------------------------------------------------------------
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
@@ -29,24 +26,18 @@ class GCSApp:
 
         self._listener_thread = None
         self._stop_event = threading.Event()
-        self._inbox: "queue.Queue[str]" = queue.Queue()
+        self._inbox = queue.Queue()  # type: queue.Queue
         self._send_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    # -----------------------------------------------------------------------
-    # UI
-    # -----------------------------------------------------------------------
-
     def _build_ui(self) -> None:
         frame = ttk.Frame(self.root, padding=12)
         frame.pack(fill=tk.BOTH, expand=True)
 
-        # ── Telemetry link ─────────────────────────────────────────────
         conn = ttk.LabelFrame(frame, text="Telemetry Link", padding=10)
         conn.pack(fill=tk.X, pady=4)
-
         ttk.Label(conn, text="Bridge Host").grid(row=0, column=0, padx=4, pady=2, sticky=tk.W)
         ttk.Entry(conn, textvariable=self.drone_host, width=18).grid(row=0, column=1, padx=4, pady=2)
         ttk.Label(conn, text="Command Port").grid(row=0, column=2, padx=4, pady=2, sticky=tk.W)
@@ -57,16 +48,14 @@ class GCSApp:
         ttk.Label(conn, text="Status:").grid(row=0, column=7, padx=4, pady=2, sticky=tk.W)
         ttk.Label(conn, textvariable=self.connection_state).grid(row=0, column=8, padx=4, pady=2, sticky=tk.W)
 
-        # ── Mission commands ────────────────────────────────────────────
         controls = ttk.LabelFrame(frame, text="Mission Commands", padding=10)
         controls.pack(fill=tk.X, pady=4)
-
         buttons = [
-            ("Start Mapping",  "START_MAPPING"),
-            ("Run Detection",  "RUN_DETECTION"),
-            ("Plan Route",     "PLAN_ROUTE"),
-            ("Start Mission",  "START_MISSION"),
-            ("Abort",          "ABORT"),
+            ("Start Survey", "START_SURVEY"),
+            ("Stop Survey", "STOP_SURVEY"),
+            ("Build Route", "BUILD_ROUTE"),
+            ("Start Mission", "START_MISSION"),
+            ("Abort", "ABORT"),
             ("Status Request", "STATUS_REQUEST"),
         ]
         for idx, (label, cmd) in enumerate(buttons):
@@ -74,54 +63,68 @@ class GCSApp:
                 row=0, column=idx, padx=4, pady=4
             )
 
-        # ── Drone-side recording (files saved on Jetson Nano) ───────────
         rec_frame = ttk.LabelFrame(
             frame,
-            text="Drone Camera Recording  (recorded & stored on Jetson Nano)",
+            text="Survey Session (record + YOLO + GPS geotagging on Jetson Nano)",
             padding=10,
         )
         rec_frame.pack(fill=tk.X, pady=4)
-
         ttk.Label(
             rec_frame,
             text=(
-                "Sends START_RECORDING / STOP_RECORDING over the telemetry radio.\n"
-                "Video and frames are saved locally on the drone (data/recordings/session-XXXX/).\n"
-                "Configure the camera source in  config/config.yaml → camera.stream_url  on the Jetson."
+                "Sends START_SURVEY / STOP_SURVEY over telemetry.\n"
+                "Raw detections, unique targets, and TSP graphs are stored in data/target_sessions/session-XXXX/.\n"
+                "Camera source is configured on the Jetson in config/config.yaml -> camera.stream_url."
             ),
             foreground="#555",
             font=("TkDefaultFont", 8, "italic"),
             justify=tk.LEFT,
         ).grid(row=0, column=0, columnspan=4, padx=4, pady=(2, 6), sticky=tk.W)
 
-        ttk.Button(
-            rec_frame,
-            text="▶  Start Recording on Drone",
-            command=lambda: self._send_command("START_RECORDING"),
-        ).grid(row=1, column=0, padx=6, pady=4)
-
-        ttk.Button(
-            rec_frame,
-            text="■  Stop Recording on Drone",
-            command=lambda: self._send_command("STOP_RECORDING"),
-        ).grid(row=1, column=1, padx=6, pady=4)
-
+        ttk.Button(rec_frame, text="Start Survey on Drone", command=lambda: self._send_command("START_SURVEY")).grid(
+            row=1, column=0, padx=6, pady=4
+        )
+        ttk.Button(rec_frame, text="Stop Survey on Drone", command=lambda: self._send_command("STOP_SURVEY")).grid(
+            row=1, column=1, padx=6, pady=4
+        )
         ttk.Label(
             rec_frame,
-            text="Check the Telemetry Feed below for confirmation and frame count.",
+            text="After stop, route + graphs are auto-built. Use Build Route to rebuild manually.",
             foreground="#888",
             font=("TkDefaultFont", 8, "italic"),
         ).grid(row=1, column=2, columnspan=2, padx=12, pady=4, sticky=tk.W)
 
-        # ── Telemetry feed log ──────────────────────────────────────────
+        rec_only_frame = ttk.LabelFrame(
+            frame,
+            text="Video Only Recording (legacy mode, no detection/route)",
+            padding=10,
+        )
+        rec_only_frame.pack(fill=tk.X, pady=4)
+        ttk.Label(
+            rec_only_frame,
+            text=(
+                "Sends START_RECORDING / STOP_RECORDING.\n"
+                "This keeps the old behavior: only video + extracted frames in data/recordings/session-XXXX/."
+            ),
+            foreground="#555",
+            font=("TkDefaultFont", 8, "italic"),
+            justify=tk.LEFT,
+        ).grid(row=0, column=0, columnspan=4, padx=4, pady=(2, 6), sticky=tk.W)
+        ttk.Button(
+            rec_only_frame,
+            text="Start Recording Only",
+            command=lambda: self._send_command("START_RECORDING"),
+        ).grid(row=1, column=0, padx=6, pady=4)
+        ttk.Button(
+            rec_only_frame,
+            text="Stop Recording Only",
+            command=lambda: self._send_command("STOP_RECORDING"),
+        ).grid(row=1, column=1, padx=6, pady=4)
+
         log_box = ttk.LabelFrame(frame, text="Telemetry Feed", padding=10)
         log_box.pack(fill=tk.BOTH, expand=True, pady=4)
         self.log_widget = tk.Text(log_box, wrap=tk.WORD, state=tk.DISABLED)
         self.log_widget.pack(fill=tk.BOTH, expand=True)
-
-    # -----------------------------------------------------------------------
-    # Telemetry / network
-    # -----------------------------------------------------------------------
 
     def _connect(self) -> None:
         if self._listener_thread and self._listener_thread.is_alive():
@@ -139,14 +142,12 @@ class GCSApp:
         host = self.drone_host.get().strip()
         port = int(self.command_port.get())
         if host not in ("127.0.0.1", "localhost"):
-            self._append_log(
-                "[WARN] Bridge Host is not localhost. For SiK radio bridge mode use 127.0.0.1."
-            )
+            self._append_log("[WARN] Bridge Host is not localhost. For local radio_bridge mode use 127.0.0.1.")
         try:
             self._send_socket.sendto(command.encode("utf-8"), (host, port))
-            self._append_log(f"[TX:{host}:{port}] {command}")
+            self._append_log("[TX:{0}:{1}] {2}".format(host, port, command))
         except OSError as exc:
-            self._append_log(f"[ERROR] Failed to send {command}: {exc}")
+            self._append_log("[ERROR] Failed to send {0}: {1}".format(command, exc))
 
     def _listener_loop(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -160,11 +161,10 @@ class GCSApp:
                     continue
                 except OSError:
                     break
-
                 decoded = data.decode("utf-8", errors="ignore")
-                self._inbox.put(f"[RX:{addr[0]}:{addr[1]}] {self._format_packet(decoded)}")
+                self._inbox.put("[RX:{0}:{1}] {2}".format(addr[0], addr[1], self._format_packet(decoded)))
         except OSError as exc:
-            self._inbox.put(f"[ERROR] Telemetry listener error: {exc}")
+            self._inbox.put("[ERROR] Telemetry listener error: {0}".format(exc))
             self.connection_state.set("DISCONNECTED")
         finally:
             sock.close()
@@ -174,10 +174,9 @@ class GCSApp:
             parsed = json.loads(payload)
         except json.JSONDecodeError:
             return payload
-
         packet_type = parsed.get("type", "UNKNOWN")
         packet_payload = parsed.get("payload", {})
-        return f"{packet_type}: {packet_payload}"
+        return "{0}: {1}".format(packet_type, packet_payload)
 
     def _append_log(self, message: str) -> None:
         self.log_widget.configure(state=tk.NORMAL)

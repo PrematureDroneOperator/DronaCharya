@@ -50,6 +50,14 @@ vision:
   target_class_name: "target"
   image_size: 640
 
+survey:
+  sessions_dir: "data/target_sessions"
+  inference_every_n: 1
+  dedup_radius_m: 3.0
+  graph_canvas_px: 1200
+  graph_margin_px: 60
+  min_gps_fix_type: 3
+
 mission:
   default_altitude_m: 15.0
   hover_time_sec: 5

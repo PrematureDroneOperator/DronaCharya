@@ -2,5 +2,5 @@
 # OpenCV and NumPy are expected from JetPack system packages.
 PyYAML==5.4.1            # PINNED for Python 3.6 compatibility (fixes cython_sources error)
 pymavlink>=2.4.0
-pyserial>=3.5           # required by telemetry/radio_bridge.py (SiK serial link)
+pyserial>=3.5           # required by telemetry/radio_bridge.py (radio/Pixhawk serial MAVLink bridge)
 dataclasses>=0.8; python_version < "3.7"

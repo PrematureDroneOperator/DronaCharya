@@ -32,6 +32,16 @@ class VisionConfig:
 
 
 @dataclass
+class SurveyConfig:
+    sessions_dir: str = "data/target_sessions"
+    inference_every_n: int = 1
+    dedup_radius_m: float = 3.0
+    graph_canvas_px: int = 1200
+    graph_margin_px: int = 60
+    min_gps_fix_type: int = 3
+
+
+@dataclass
 class MissionConfig:
     default_altitude_m: float = 15.0
     hover_time_sec: int = 5
@@ -64,6 +74,7 @@ class AppPaths:
     detections_dir: Path
     routes_dir: Path
     logs_dir: Path
+    target_sessions_dir: Path
 
 
 @dataclass
@@ -72,6 +83,7 @@ class AppConfig:
     camera: CameraConfig
     mapping: MappingConfig
     vision: VisionConfig
+    survey: SurveyConfig
     mission: MissionConfig
     telemetry: TelemetryConfig
     logging: LoggingConfig
@@ -92,20 +104,24 @@ def _default_dict() -> Dict[str, Any]:
         "camera": CameraConfig().__dict__,
         "mapping": MappingConfig().__dict__,
         "vision": VisionConfig().__dict__,
+        "survey": SurveyConfig().__dict__,
         "mission": MissionConfig().__dict__,
         "telemetry": TelemetryConfig().__dict__,
         "logging": LoggingConfig().__dict__,
     }
 
 
-def ensure_data_dirs(base_dir: Path) -> AppPaths:
+def ensure_data_dirs(base_dir: Path, target_sessions_dir_setting: str = "data/target_sessions") -> AppPaths:
     data_dir = base_dir / "data"
     maps_dir = data_dir / "maps"
     detections_dir = data_dir / "detections"
     routes_dir = data_dir / "routes"
     logs_dir = data_dir / "logs"
+    target_sessions_dir = Path(target_sessions_dir_setting)
+    if not target_sessions_dir.is_absolute():
+        target_sessions_dir = base_dir / target_sessions_dir
 
-    for directory in (data_dir, maps_dir, detections_dir, routes_dir, logs_dir):
+    for directory in (data_dir, maps_dir, detections_dir, routes_dir, logs_dir, target_sessions_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
     return AppPaths(
@@ -115,6 +131,7 @@ def ensure_data_dirs(base_dir: Path) -> AppPaths:
         detections_dir=detections_dir,
         routes_dir=routes_dir,
         logs_dir=logs_dir,
+        target_sessions_dir=target_sessions_dir,
     )
 
 
@@ -131,13 +148,14 @@ def load_config(config_path: Path, base_dir: Optional[Path] = None) -> AppConfig
             raw = parsed
 
     merged = _merge(_default_dict(), raw)
-    paths = ensure_data_dirs(root)
+    paths = ensure_data_dirs(root, merged["survey"].get("sessions_dir", "data/target_sessions"))
 
     return AppConfig(
         paths=paths,
         camera=CameraConfig(**merged["camera"]),
         mapping=MappingConfig(**merged["mapping"]),
         vision=VisionConfig(**merged["vision"]),
+        survey=SurveyConfig(**merged["survey"]),
         mission=MissionConfig(**merged["mission"]),
         telemetry=TelemetryConfig(**merged["telemetry"]),
         logging=LoggingConfig(**merged["logging"]),

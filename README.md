@@ -1,12 +1,21 @@
 # dronAcharya
 
-`dronAcharya` is an onboard autonomous mapping, target detection, route planning, and MAVLink mission execution stack designed for NVIDIA Jetson Nano.
+`dronAcharya` is an onboard autonomous survey, target geotagging, route planning, and MAVLink mission execution stack for NVIDIA Jetson Nano.
 
-The system supports:
-- `GUI` mode (Tkinter)
-- `CLI` mode (headless)
+## Current Mission Flow
 
-Startup always prompts for mode selection unless `--mode` is passed.
+The active runtime flow is now session-based:
+
+1. Start survey from GCS (`START_SURVEY`).
+2. Drone records video locally and runs YOLOv8 in parallel.
+3. Each valid detection is geotagged with live GPS and stored as raw points.
+4. Stop survey (`STOP_SURVEY`) to auto-finalize:
+   - deduplicated target list
+   - TSP Hamiltonian cycle route
+   - raw graph + TSP graph
+5. Start mission (`START_MISSION`) to fly the saved numbered order, including return-to-start leg.
+
+The legacy map stitching modules are still in the repo but no longer used by the active control flow.
 
 ## Folder Structure
 
@@ -18,38 +27,37 @@ dronAcharya/
 │   ├── controller.py
 │   ├── main.py
 │   └── mode_selector.py
-├── mapping/
-│   ├── mapper.py
-│   └── stitching.py
-├── navigation/
-│   ├── mavlink_controller.py
-│   └── mission_executor.py
+├── survey/
+│   └── session_manager.py
 ├── planning/
 │   ├── coordinate_transform.py
 │   └── tsp_solver.py
+├── navigation/
+│   ├── mavlink_controller.py
+│   └── mission_executor.py
+├── vision/
+│   ├── frame_yolo_detector.py
+│   ├── recorder.py
+│   ├── frame_extractor.py
+│   └── yolo_detector.py
 ├── telemetry/
 │   ├── command_listener.py
 │   └── telemetry_server.py
+├── gcs/
+│   └── gcs_app.py
 ├── ui/
 │   ├── cli_interface.py
 │   └── gui_app.py
-├── utils/
-│   ├── config.py
-│   └── logger.py
-├── vision/
-│   ├── yolo_detector.py
-│   ├── recorder.py
-│   └── frame_extractor.py
-├── gcs/
-│   └── gcs_app.py
+├── mapping/                  # kept for reference, not active runtime
+│   ├── mapper.py
+│   └── stitching.py
 ├── data/
-│   ├── maps/
-│   ├── detections/
+│   ├── recordings/
+│   ├── target_sessions/
 │   ├── routes/
+│   ├── detections/
 │   └── logs/
-├── main.py
-├── requirements.txt
-└── setup.sh
+└── training/
 ```
 
 ## Setup (Jetson Ubuntu)
@@ -60,12 +68,10 @@ chmod +x setup.sh
 ./setup.sh
 ```
 
-Jetson Nano base notes:
-- The drone app now runs on Python `3.6` syntax.
-- If `tkinter` is missing, `--mode gui` falls back to CLI automatically.
-- YOLO/Ultralytics is optional and not installed by default in `requirements.txt`.
-- On Jetson, prefer system OpenCV/NumPy packages:
-  - `sudo apt-get install -y python3-opencv python3-numpy`
+Notes:
+- Python 3.6 syntax compatibility is preserved.
+- YOLO/Ultralytics is optional in base requirements.
+- On Jetson, prefer system OpenCV/NumPy packages.
 
 ## Run
 
@@ -76,164 +82,146 @@ cd dronAcharya
 python3 main.py
 ```
 
-Optional direct mode:
-
-```bash
-python3 main.py --mode gui
-python3 main.py --mode cli
-```
-
-Ground Control Station app:
+GCS application:
 
 ```bash
 cd dronAcharya
 python3 gcs/gcs_app.py
 ```
 
-## Camera Recording
+## Connection Mechanism (Updated)
 
-### Architecture — everything stays on the drone
+Transport now assumes telemetry radio is connected through Pixhawk routing:
 
-```
-┌─────────────────────────────────────┐         ┌───────────────────────┐
-│  DRONE  (Jetson Nano)               │         │  GCS LAPTOP           │
-│                                     │         │                       │
-│  dronAcharya main.py                │         │  gcs_app.py           │
-│    ├─ CommandListener               │◄─SiK───►│   ▶ Start Recording   │
-│    └─ DroneRecorder  ←── triggers   │  Radio  │   ■ Stop  Recording   │
-│           │                         │  only   │                       │
-│           ▼                         │         │  Telemetry Feed shows │
-│   data/recordings/session-XXXX/     │         │  session path +       │
-│     ├── recording.mp4               │         │  frame count          │
-│     └── frames/frame_000001.jpg …   │         │                       │
-└─────────────────────────────────────┘         └───────────────────────┘
-```
+- GCS side: radio on COM/serial -> `telemetry/radio_bridge.py --role gcs`
+- Drone side: Jetson serial link to Pixhawk -> `telemetry/radio_bridge.py --role drone`
+- App ports remain unchanged (`14560` commands, `14561` telemetry on localhost)
 
-- **No video is sent over the radio.** The GCS sends only two small text commands.
-- Files accumulate on the Jetson's filesystem. Retrieve them via SSH/SCP or a USB drive after the flight.
-- The camera source (device index or internal pipeline) is configured **on the Jetson** — not on the GCS.
+See full setup instructions in `setup.md`.
 
----
+## Commands
 
-### Step 1 — Configure the camera source on the Jetson Nano
+### Canonical telemetry commands
 
-Open `config/config.yaml` **on the Jetson** and set `stream_url`:
-
-```yaml
-# config/config.yaml  ← edit this ON THE JETSON
-camera:
-  device_id: 0          # used when stream_url is empty
-  stream_url: ""        # ← set to "rtsp://..." or leave "" for device_id
-```
-
-| `stream_url` value | Camera used |
-|---|---|
-| `""` (empty) | `device_id` — local V4L2/CSI device (`/dev/video0` etc.) |
-| `"rtsp://..."` | Any RTSP source (another camera, GStreamer pipeline, etc.) |
-
-For the Jetson CSI camera (ribbon-cable module) leave `stream_url` empty and `device_id: 0`.
-For a USB webcam set `device_id: 0` (or whichever `/dev/videoX`).
-
-### Step 2 — From the GCS app
-
-Open the GCS app (`python3 gcs/gcs_app.py`) and connect to the drone.
-
-| Button | Command sent over radio | What happens on the drone |
-|---|---|---|
-| **▶ Start Recording on Drone** | `START_RECORDING` | Opens camera, writes `session-XXXX/recording.mp4` at 30 FPS |
-| **■ Stop Recording on Drone** | `STOP_RECORDING` | Stops capture; auto-extracts frames to `session-XXXX/frames/` |
-
-The **Telemetry Feed** log will show:
-```
-[RX] LOG: Recording started → /home/nvidia/.../data/recordings/session-0000
-[RX] LOG: Recording saved → recording.mp4 | 1234 frames extracted to frames/
-```
-
-### Step 3 — Retrieve files after the flight
-
-```bash
-# Copy the whole recordings directory via SSH
-scp -r nvidia@<jetson-ip>:/home/nvidia/dronAcharya/data/recordings ./
-
-# Or mount the Jetson over USB and copy manually
-```
-
-### Session layout (on the Jetson)
-
-```text
-data/recordings/
-└── session-0000/
-    ├── recording.mp4
-    └── frames/
-        ├── frame_000001.jpg
-        ├── frame_000002.jpg
-        └── …
-```
-
-Sessions auto-increment (`session-0001`, `session-0002`, …) and are never overwritten.
-
-### Running the recorder manually on the Jetson (CLI)
-
-```bash
-# Run on Jetson – press q to stop
-python3 -m vision.recorder
-
-# Specify a camera device explicitly
-python3 -m vision.recorder --source 0 --fps 30 --output-dir data/recordings
-
-# Extract frames from an existing recording
-python3 -m vision.frame_extractor data/recordings/session-0000/recording.mp4
-
-# Extract every 5th frame only
-python3 -m vision.frame_extractor recording.mp4 --out frames/ --every-n 5
-```
-
-
-# Option 3 – extract frames from an existing file
-extractor = FrameExtractor(jpeg_quality=95)
-count = extractor.extract("session-0000/recording.mp4", "session-0000/frames/")
-print(f"{count} frames extracted")
-```
-
-### Session layout
-
-```text
-recordings/
-└── session-0000/          ← auto-named, 4-digit zero-padded
-    ├── recording.mp4
-    └── frames/
-        ├── frame_000001.jpg
-        ├── frame_000002.jpg
-        └── …
-```
-
-Sessions are numbered sequentially (`session-0000`, `session-0001`, …) — existing sessions are never overwritten.
-
-## CLI Commands
-
-- `map`
-- `detect`
-- `plan`
-- `start_mission`
-- `status`
-- `exit`
-
-## Telemetry Commands (GCS to Drone)
-
-- `START_MAPPING`
-- `RUN_DETECTION`
-- `PLAN_ROUTE`
+- `START_SURVEY`
+- `STOP_SURVEY`
+- `BUILD_ROUTE`
+- `START_RECORDING` (video-only mode)
+- `STOP_RECORDING` (video-only mode)
 - `START_MISSION`
 - `ABORT`
 - `STATUS_REQUEST`
 
+### Backward-compatible aliases
+
+- `START_MAPPING -> START_SURVEY`
+- `RUN_DETECTION -> BUILD_ROUTE`
+- `PLAN_ROUTE -> BUILD_ROUTE`
+
+### CLI commands
+
+- `start_survey`
+- `stop_survey`
+- `start_recording`
+- `stop_recording`
+- `build_route`
+- `start_mission`
+- `status`
+- `abort`
+- `exit`
+
+Aliases in CLI:
+- `map -> start_survey`
+- `detect -> build_route`
+- `plan -> build_route`
+
+## Video-Only Recording (Legacy Mode)
+
+Use standalone recording when you only want video + extracted frames and do not want survey detections/route generation.
+
+Artifacts are stored in:
+
+`data/recordings/session-XXXX/`
+
+## Session Artifacts
+
+All survey results are partitioned by `session-XXXX` under:
+
+`data/target_sessions/`
+
+Example:
+
+```text
+data/target_sessions/
+└── session-0004/
+    ├── metadata.json
+    ├── raw_detections.csv
+    ├── raw_detections.json
+    ├── unique_targets.csv
+    ├── unique_targets.json
+    ├── route_tsp_cycle.json
+    └── graphs/
+        ├── raw_points.png
+        └── tsp_cycle.png
+```
+
+### Graph location (for judges/demo)
+
+- Raw point graph: `data/target_sessions/session-XXXX/graphs/raw_points.png`
+- TSP Hamiltonian-cycle graph: `data/target_sessions/session-XXXX/graphs/tsp_cycle.png`
+
+## CSV / JSON Schemas
+
+### `raw_detections.csv`
+
+Columns:
+
+`frame_idx,timestamp_utc,class_name,confidence,latitude,longitude,gps_fix_type,pixel_x,pixel_y,bbox_x1,bbox_y1,bbox_x2,bbox_y2`
+
+### `unique_targets.csv`
+
+Columns:
+
+`target_id,latitude,longitude,hit_count,avg_confidence,max_confidence,first_seen_utc,last_seen_utc`
+
+### `route_tsp_cycle.json`
+
+Main fields:
+
+- `session_id`
+- `timestamp_utc`
+- `closed_cycle`
+- `total_targets`
+- `total_distance_m`
+- `start_position`
+- `ordered_targets`
+- `waypoints`
+
+## Mission Replay Behavior
+
+When `START_MISSION` is triggered:
+
+1. If in-memory waypoints exist, use them.
+2. Otherwise auto-load the latest completed session route from `data/target_sessions/session-XXXX/route_tsp_cycle.json`.
+3. Execute numbered TSP order and include return-to-start waypoint.
+
+## Survey Configuration
+
+`config/config.yaml` includes:
+
+```yaml
+survey:
+  sessions_dir: "data/target_sessions"
+  inference_every_n: 1
+  dedup_radius_m: 3.0
+  graph_canvas_px: 1200
+  graph_margin_px: 60
+  min_gps_fix_type: 3
+```
+
 ## Training Pipeline
 
-A complete target-model training module is available under:
-- `training/`
-
-End-to-end guide:
-- `training/README.md`
+Target model training modules remain under `training/`.
 
 Main scripts:
 - `python -m training.prepare_raw_media`

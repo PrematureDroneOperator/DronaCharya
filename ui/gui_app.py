@@ -11,7 +11,7 @@ class DroneGUI:
 
         self.connection_var = tk.StringVar(value="UNKNOWN")
         self.mode_var = tk.StringVar(value="GUI")
-        self.mapping_var = tk.StringVar(value="0.0 %")
+        self.mapping_var = tk.StringVar(value="IDLE")
         self.targets_var = tk.StringVar(value="0")
         self.mission_var = tk.StringVar(value="IDLE")
         self.error_var = tk.StringVar(value="-")
@@ -30,21 +30,21 @@ class DroneGUI:
 
         self._status_row(status_box, "Connection", self.connection_var, 0)
         self._status_row(status_box, "Current Mode", self.mode_var, 1)
-        self._status_row(status_box, "Mapping Progress", self.mapping_var, 2)
-        self._status_row(status_box, "Detected Targets", self.targets_var, 3)
+        self._status_row(status_box, "Survey State", self.mapping_var, 2)
+        self._status_row(status_box, "Unique Targets", self.targets_var, 3)
         self._status_row(status_box, "Mission State", self.mission_var, 4)
         self._status_row(status_box, "Last Error", self.error_var, 5)
 
         controls = ttk.LabelFrame(frame, text="Controls", padding=10)
         controls.pack(fill=tk.X, padx=4, pady=4)
 
-        ttk.Button(controls, text="Start Mapping", command=lambda: self._queue_command("map")).grid(
+        ttk.Button(controls, text="Start Survey", command=lambda: self._queue_command("start_survey")).grid(
             row=0, column=0, padx=4, pady=4
         )
-        ttk.Button(controls, text="Run Detection", command=lambda: self._queue_command("detect")).grid(
+        ttk.Button(controls, text="Stop Survey", command=lambda: self._queue_command("stop_survey")).grid(
             row=0, column=1, padx=4, pady=4
         )
-        ttk.Button(controls, text="Plan Route", command=lambda: self._queue_command("plan")).grid(
+        ttk.Button(controls, text="Build Route", command=lambda: self._queue_command("build_route")).grid(
             row=0, column=2, padx=4, pady=4
         )
         ttk.Button(controls, text="Start Mission", command=lambda: self._queue_command("start_mission")).grid(
@@ -55,6 +55,12 @@ class DroneGUI:
         )
         ttk.Button(controls, text="Abort", command=lambda: self._queue_command("ABORT")).grid(
             row=0, column=5, padx=4, pady=4
+        )
+        ttk.Button(controls, text="Start Recording", command=lambda: self._queue_command("start_recording")).grid(
+            row=1, column=0, padx=4, pady=4
+        )
+        ttk.Button(controls, text="Stop Recording", command=lambda: self._queue_command("stop_recording")).grid(
+            row=1, column=1, padx=4, pady=4
         )
 
         log_box = ttk.LabelFrame(frame, text="Logs", padding=10)
@@ -75,8 +81,8 @@ class DroneGUI:
 
         self.connection_var.set(status.get("connection_status", "UNKNOWN"))
         self.mode_var.set(status.get("current_mode", "GUI"))
-        self.mapping_var.set(f'{status.get("mapping_progress", 0.0):.1f} %')
-        self.targets_var.set(str(status.get("detected_targets_count", 0)))
+        self.mapping_var.set(status.get("survey_state", "IDLE"))
+        self.targets_var.set(str(status.get("unique_target_count", 0)))
         self.mission_var.set(status.get("mission_state", "IDLE"))
         self.error_var.set(status.get("last_error", "-") or "-")
 

@@ -1,21 +1,15 @@
-import json
 import queue
 import threading
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from mapping.mapper import TerrainMapper
 from navigation.mavlink_controller import MavlinkController
 from navigation.mission_executor import MissionExecutor
-from planning.coordinate_transform import CoordinateTransformer
-from planning.tsp_solver import TSPSolver
+from survey.session_manager import SurveySessionManager
 from telemetry.telemetry_server import TelemetryServer
 from utils.config import AppConfig
 from utils.logger import RingBufferLogHandler
 from vision.recorder import DroneRecorder
-from vision.yolo_detector import YoloTargetDetector
 
 
 @dataclass
@@ -25,11 +19,17 @@ class AppState:
     mapping_progress: float = 0.0
     detected_targets_count: int = 0
     mission_state: str = "IDLE"
-    recording_state: str = "IDLE"           # IDLE | RECORDING | STOPPED
-    last_recording_session: str = ""        # path of last session-XXXX dir
+    recording_state: str = "IDLE"  # IDLE | RECORDING | STOPPING
+    survey_state: str = "IDLE"  # IDLE | RUNNING | STOPPING
+    last_recording_session: str = ""
+    last_target_session: str = ""
     last_map_path: str = ""
     last_detection_path: str = ""
     last_route_path: str = ""
+    last_raw_graph_path: str = ""
+    last_tsp_graph_path: str = ""
+    raw_detection_count: int = 0
+    unique_target_count: int = 0
     last_error: str = ""
     takeoff_latitude: Optional[float] = None
     takeoff_longitude: Optional[float] = None
@@ -53,16 +53,16 @@ class DroneAcharyaController:
         self.state_lock = threading.Lock()
 
         self.telemetry_server = TelemetryServer(config.telemetry, logger)
-        self.mapper = TerrainMapper(config, logger)
-        self.detector = YoloTargetDetector(config, logger)
-        self.tsp_solver = TSPSolver()
-        self.transformer = CoordinateTransformer(config.mapping.meters_per_pixel)
+        self.survey_manager = SurveySessionManager(
+            config=config,
+            logger=logger,
+            telemetry_log=lambda message: self.telemetry_server.send_log(message),
+        )
 
-        self._targets = []  # type: List[Dict[str, Any]]
         self._ordered_waypoints = []  # type: List[Dict[str, Any]]
         self._abort_event = threading.Event()
 
-        # Recording
+        # Standalone recording (video-only mode)
         self._recorder = None  # type: Optional[DroneRecorder]
         self._rec_thread = None  # type: Optional[threading.Thread]
         self._rec_stop_event = threading.Event()
@@ -85,6 +85,14 @@ class DroneAcharyaController:
         self._command_queue.put(None)
         if self._worker_thread.is_alive():
             self._worker_thread.join(timeout=3.0)
+        if self._rec_thread and self._rec_thread.is_alive():
+            self._rec_stop_event.set()
+            self._rec_thread.join(timeout=5.0)
+        if self.survey_manager.is_running:
+            try:
+                self.survey_manager.stop_survey()
+            except Exception:
+                pass
         self.telemetry_server.stop()
         self.logger.info("dronAcharya stopped.")
 
@@ -98,9 +106,9 @@ class DroneAcharyaController:
         if wait and event:
             completed = event.wait(timeout=timeout)
             if not completed:
-                return {"ok": False, "message": f"Command '{command}' timed out after {timeout:.0f}s"}
+                return {"ok": False, "message": "Command '{0}' timed out after {1:.0f}s".format(command, timeout)}
             return request.response
-        return {"ok": True, "message": f"Command '{command}' queued"}
+        return {"ok": True, "message": "Command '{0}' queued".format(command)}
 
     def get_status_snapshot(self) -> Dict[str, Any]:
         with self.state_lock:
@@ -115,7 +123,8 @@ class DroneAcharyaController:
         return len(records), records[offset:]
 
     def _on_remote_command(self, command: str, source_addr: Tuple[str, int]) -> None:
-        self.submit_command(command=command, source=f"gcs:{source_addr[0]}:{source_addr[1]}", wait=False)
+        source = "gcs:{0}:{1}".format(source_addr[0], source_addr[1])
+        self.submit_command(command=command, source=source, wait=False)
 
     def _command_worker(self) -> None:
         while not self._worker_stop.is_set():
@@ -123,7 +132,6 @@ class DroneAcharyaController:
                 request = self._command_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
-
             if request is None:
                 continue
 
@@ -134,7 +142,7 @@ class DroneAcharyaController:
                 self.logger.exception("Command '%s' failed", command)
                 self._set_state(last_error=str(exc), mission_state="ERROR")
                 self._send_status()
-                self.telemetry_server.send_log(f"{command} failed: {exc}", level="ERROR")
+                self.telemetry_server.send_log("{0} failed: {1}".format(command, exc), level="ERROR")
                 result = {"ok": False, "message": str(exc)}
 
             request.response.update(result)
@@ -144,22 +152,29 @@ class DroneAcharyaController:
     def _normalize_command(self, command: str) -> str:
         canonical = command.strip().upper()
         aliases = {
-            "MAP": "START_MAPPING",
-            "DETECT": "RUN_DETECTION",
-            "PLAN": "PLAN_ROUTE",
+            "MAP": "START_SURVEY",
+            "DETECT": "BUILD_ROUTE",
+            "PLAN": "BUILD_ROUTE",
             "STATUS": "STATUS_REQUEST",
+            "START_MAPPING": "START_SURVEY",
+            "RUN_DETECTION": "BUILD_ROUTE",
+            "PLAN_ROUTE": "BUILD_ROUTE",
         }
         return aliases.get(canonical, canonical)
 
     def _execute_command(self, command: str, source: str) -> Dict[str, Any]:
         self.logger.info("Executing command '%s' (source=%s)", command, source)
 
-        if command == "START_MAPPING":
-            return self._run_mapping()
-        if command == "RUN_DETECTION":
-            return self._run_detection()
-        if command == "PLAN_ROUTE":
-            return self._run_planning()
+        if command == "START_SURVEY":
+            return self._start_survey()
+        if command == "STOP_SURVEY":
+            return self._stop_survey()
+        if command == "BUILD_ROUTE":
+            return self._build_route()
+        if command == "START_RECORDING":
+            return self._start_recording_local()
+        if command == "STOP_RECORDING":
+            return self._stop_recording_local()
         if command == "START_MISSION":
             return self._start_mission()
         if command == "ABORT":
@@ -168,123 +183,172 @@ class DroneAcharyaController:
             status = self.get_status_snapshot()
             self._send_status()
             return {"ok": True, "message": "Status sent", "status": status}
-        if command == "START_RECORDING":
-            return self._start_recording_local()
-        if command == "STOP_RECORDING":
-            return self._stop_recording_local()
-        return {"ok": False, "message": f"Unsupported command: {command}"}
+        return {"ok": False, "message": "Unsupported command: {0}".format(command)}
 
-    def _run_mapping(self) -> Dict[str, Any]:
-        self._set_state(mission_state="MAPPING", mapping_progress=0.0, last_error="")
-        self.telemetry_server.send_log("Mapping started.")
-
-        map_path = self.mapper.run_mapping(progress_callback=self._mapping_progress_update)
-
+    def _start_survey(self) -> Dict[str, Any]:
+        if self._rec_thread and self._rec_thread.is_alive():
+            return {"ok": False, "message": "Standalone recording is running. Stop recording before survey."}
+        self.telemetry_server.send_log("Survey start requested.")
+        try:
+            result = self.survey_manager.start_survey()
+        except Exception:
+            self._set_state(mission_state="READY", survey_state="IDLE", recording_state="IDLE")
+            raise
         self._set_state(
-            mission_state="MAPPED",
-            mapping_progress=100.0,
-            last_map_path=str(map_path),
+            mission_state="SURVEY_RUNNING",
+            survey_state="RUNNING",
+            recording_state="RECORDING",
+            last_error="",
+        )
+        self._set_state(
+            last_target_session=result.get("session_dir", ""),
+            last_recording_session=result.get("recording_session", ""),
         )
         self._send_status()
-        self.telemetry_server.send_log(f"Mapping complete: {map_path}")
-        return {"ok": True, "message": f"Map generated at {map_path}", "map_path": str(map_path)}
+        return result
 
-    def _run_detection(self) -> Dict[str, Any]:
-        snapshot = self.get_status_snapshot()
-        if not snapshot["last_map_path"]:
-            raise RuntimeError("Detection requires an existing map. Run 'map' first.")
+    def _stop_survey(self) -> Dict[str, Any]:
+        self._set_state(survey_state="STOPPING", recording_state="STOPPING", mission_state="SURVEY_STOPPING", last_error="")
+        self.telemetry_server.send_log("Survey stop requested.")
 
-        map_path = Path(snapshot["last_map_path"])
-        self._set_state(mission_state="DETECTING", last_error="")
-        self.telemetry_server.send_log("Detection started.")
+        result = self.survey_manager.stop_survey()
+        if not result.get("ok"):
+            self._set_state(survey_state="IDLE", recording_state="IDLE")
+            self._send_status()
+            return result
 
-        targets, annotated_path, json_path = self.detector.detect(map_path)
-        self._targets = targets
-
-        self._set_state(
-            mission_state="DETECTION_DONE",
-            detected_targets_count=len(targets),
-            last_detection_path=str(annotated_path),
-        )
-        self._send_status()
-        self.telemetry_server.send_log(f"Detection complete: {len(targets)} targets")
-        return {
-            "ok": True,
-            "message": f"Detection complete. targets={len(targets)}",
-            "targets_json": str(json_path),
-            "annotated_map": str(annotated_path),
-            "count": len(targets),
-        }
-
-    def _run_planning(self) -> Dict[str, Any]:
-        if not self._targets:
-            raise RuntimeError("Route planning requires detections. Run 'detect' first.")
-
-        self._set_state(mission_state="PLANNING", last_error="")
-        self.telemetry_server.send_log("Route planning started.")
-
-        target_points = [(float(t["relative_x_m"]), float(t["relative_y_m"])) for t in self._targets]
-        solution = self.tsp_solver.solve(target_points, start_xy=(0.0, 0.0), include_return_to_start=False)
-        ordered_targets = [self._targets[idx] for idx in solution.order]
-
-        takeoff = self._resolve_takeoff_gps()
-        waypoints = []
-        for index, target in enumerate(ordered_targets):
-            latitude, longitude = self.transformer.relative_to_gps(
-                takeoff["latitude"],
-                takeoff["longitude"],
-                float(target["relative_x_m"]),
-                float(target["relative_y_m"]),
-            )
-            waypoints.append(
-                {
-                    "index": index,
-                    "target_id": target["id"],
-                    "latitude": round(latitude, 8),
-                    "longitude": round(longitude, 8),
-                    "relative_offset": {
-                        "x_m": float(target["relative_x_m"]),
-                        "y_m": float(target["relative_y_m"]),
-                    },
-                    "altitude_m": float(self.config.mission.default_altitude_m),
-                    "hover_time": float(self.config.mission.hover_time_sec),
-                }
-            )
-
-        self._ordered_waypoints = waypoints
-        route_payload = {
-            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-            "start_position": {
-                "latitude": takeoff["latitude"],
-                "longitude": takeoff["longitude"],
-            },
-            "total_targets": len(ordered_targets),
-            "distance_m": round(solution.distance_m, 3),
-            "waypoints": waypoints,
-        }
-        route_path = self.config.paths.routes_dir / "mission_route.json"
-        with route_path.open("w", encoding="utf-8") as handle:
-            json.dump(route_payload, handle, indent=2)
+        route = result.get("route", {})
+        self._ordered_waypoints = route.get("waypoints", [])
+        start_position = route.get("start_position", {})
+        start_lat = float(start_position.get("latitude", 0.0)) if start_position else None
+        start_lon = float(start_position.get("longitude", 0.0)) if start_position else None
 
         self._set_state(
             mission_state="ROUTE_READY",
-            last_route_path=str(route_path),
-            takeoff_latitude=float(takeoff["latitude"]),
-            takeoff_longitude=float(takeoff["longitude"]),
-            connection_status="CONNECTED",
+            survey_state="IDLE",
+            recording_state="IDLE",
+            last_target_session=result.get("session_dir", ""),
+            last_recording_session=result.get("recording_session", ""),
+            raw_detection_count=int(result.get("raw_count", 0)),
+            unique_target_count=int(result.get("unique_count", 0)),
+            detected_targets_count=int(result.get("unique_count", 0)),
+            last_route_path=result.get("route_path", ""),
+            last_raw_graph_path=result.get("raw_graph", ""),
+            last_tsp_graph_path=result.get("tsp_graph", ""),
+            takeoff_latitude=start_lat,
+            takeoff_longitude=start_lon,
         )
         self._send_status()
-        self.telemetry_server.send_log(f"Route ready: {route_path}")
-        return {
-            "ok": True,
-            "message": f"Route planned with {len(waypoints)} waypoints",
-            "route_path": str(route_path),
-            "distance_m": solution.distance_m,
-        }
+        self.telemetry_server.send_log(
+            "Survey complete: raw={0}, unique={1}, route={2}".format(
+                result.get("raw_count", 0),
+                result.get("unique_count", 0),
+                result.get("route_path", ""),
+            )
+        )
+        return result
+
+    def _build_route(self) -> Dict[str, Any]:
+        self._set_state(mission_state="BUILDING_ROUTE", last_error="")
+        self.telemetry_server.send_log("Route build requested.")
+
+        result = self.survey_manager.build_route()
+        route = result.get("route", {})
+        self._ordered_waypoints = route.get("waypoints", [])
+        start_position = route.get("start_position", {})
+
+        self._set_state(
+            mission_state="ROUTE_READY",
+            survey_state="IDLE",
+            detected_targets_count=int(result.get("unique_count", 0)),
+            raw_detection_count=int(result.get("raw_count", 0)),
+            unique_target_count=int(result.get("unique_count", 0)),
+            last_target_session=result.get("session_dir", ""),
+            last_route_path=result.get("route_path", ""),
+            last_raw_graph_path=result.get("raw_graph", ""),
+            last_tsp_graph_path=result.get("tsp_graph", ""),
+            takeoff_latitude=float(start_position.get("latitude", 0.0)) if start_position else None,
+            takeoff_longitude=float(start_position.get("longitude", 0.0)) if start_position else None,
+        )
+        self._send_status()
+        self.telemetry_server.send_log("Route ready: {0}".format(result.get("route_path", "")))
+        return result
+
+    def _start_recording_local(self) -> Dict[str, Any]:
+        if self.survey_manager.is_running:
+            return {"ok": False, "message": "Survey is running. Stop survey before standalone recording."}
+        if self._rec_thread and self._rec_thread.is_alive():
+            return {"ok": False, "message": "Recording already in progress."}
+
+        source = self.config.camera.stream_url.strip() or self.config.camera.device_id
+        output_dir = self.config.paths.data_dir / "recordings"
+
+        self._rec_stop_event.clear()
+        self._recorder = DroneRecorder(
+            source=source,
+            fps=30,
+            output_dir=str(output_dir),
+            fourcc=self.config.camera.fourcc,
+            container=self.config.camera.container,
+            auto_extract=True,
+        )
+        try:
+            self._recorder.start()
+        except RuntimeError as exc:
+            self._set_state(last_error=str(exc))
+            self._send_status()
+            return {"ok": False, "message": "Could not open camera: {0}".format(exc)}
+
+        session_dir = str(self._recorder.session_dir)
+        self._set_state(recording_state="RECORDING", last_recording_session=session_dir, mission_state="RECORDING_ONLY")
+        self.telemetry_server.send_log("Recording started -> {0}".format(session_dir))
+        self._send_status()
+
+        self._rec_thread = threading.Thread(target=self._recording_loop, name="DroneRecorder", daemon=True)
+        self._rec_thread.start()
+        return {"ok": True, "message": "Recording started. Session: {0}".format(session_dir), "session_dir": session_dir}
+
+    def _recording_loop(self) -> None:
+        assert self._recorder is not None
+        while not self._rec_stop_event.is_set():
+            ok, _, _, _ = self._recorder.record_frame()
+            if not ok:
+                self.telemetry_server.send_log("Camera source exhausted - recording stopped automatically.", level="WARNING")
+                break
+
+        video_path = self._recorder.stop()
+        session_dir = self._recorder.session_dir
+        frames_dir = session_dir / "frames" if session_dir else None
+        frame_count = len(list(frames_dir.glob("*.jpg"))) if frames_dir and frames_dir.exists() else 0
+        self._set_state(recording_state="IDLE", mission_state="READY")
+        self.telemetry_server.send_log(
+            "Recording saved -> {0} | {1} frames extracted to {2}".format(video_path, frame_count, frames_dir)
+        )
+        self._send_status()
+
+    def _stop_recording_local(self) -> Dict[str, Any]:
+        if not (self._rec_thread and self._rec_thread.is_alive()):
+            return {"ok": False, "message": "No recording in progress."}
+        self._rec_stop_event.set()
+        self._set_state(recording_state="STOPPING")
+        self._send_status()
+        return {"ok": True, "message": "Stop signal sent. Extracting frames..."}
 
     def _start_mission(self) -> Dict[str, Any]:
         if not self._ordered_waypoints:
-            raise RuntimeError("Mission route not available. Run 'plan' first.")
+            restored = self.survey_manager.load_latest_route()
+            route = restored.get("route", {})
+            self._ordered_waypoints = restored.get("waypoints", [])
+            if not self._ordered_waypoints:
+                raise RuntimeError("Latest session route has no waypoints.")
+            start_position = route.get("start_position", {})
+            self._set_state(
+                last_target_session=restored.get("session_dir", ""),
+                last_route_path=restored.get("route_path", ""),
+                takeoff_latitude=float(start_position.get("latitude", 0.0)) if start_position else None,
+                takeoff_longitude=float(start_position.get("longitude", 0.0)) if start_position else None,
+            )
+            self.telemetry_server.send_log("Loaded route from latest completed session.")
 
         self._abort_event.clear()
         self._set_state(mission_state="MISSION_RUNNING", last_error="")
@@ -317,120 +381,12 @@ class DroneAcharyaController:
             except Exception:
                 pass
 
-    # ------------------------------------------------------------------
-    # Recording (runs locally on the drone / Jetson Nano)
-    # ------------------------------------------------------------------
-
-    def _start_recording_local(self) -> Dict[str, Any]:
-        """Start capturing from the onboard camera and save locally."""
-        if self._rec_thread and self._rec_thread.is_alive():
-            return {"ok": False, "message": "Recording already in progress."}
-
-        source = self.config.camera.stream_url.strip() or self.config.camera.device_id
-        output_dir = self.config.paths.data_dir / "recordings"
-
-        self._rec_stop_event.clear()
-        self._recorder = DroneRecorder(
-            source=source,
-            fps=30,
-            output_dir=str(output_dir),
-            fourcc=self.config.camera.fourcc,
-            container=self.config.camera.container,
-            auto_extract=True,
-        )
-        try:
-            self._recorder.start()
-        except RuntimeError as exc:
-            self._set_state(last_error=str(exc))
-            self._send_status()
-            return {"ok": False, "message": f"Could not open camera: {exc}"}
-
-        session_dir = str(self._recorder.session_dir)
-        self._set_state(recording_state="RECORDING", last_recording_session=session_dir)
-        self.telemetry_server.send_log("Recording started -> {}".format(session_dir))
-        self._send_status()
-
-        self._rec_thread = threading.Thread(
-            target=self._recording_loop, name="DroneRecorder", daemon=True
-        )
-        self._rec_thread.start()
-        return {"ok": True, "message": f"Recording started. Session: {session_dir}"}
-
-    def _recording_loop(self) -> None:
-        """Background thread: pump frames until stop is requested."""
-        assert self._recorder is not None
-        while not self._rec_stop_event.is_set():
-            ok = self._recorder.record_frame()
-            if not ok:
-                self.telemetry_server.send_log("Camera source exhausted - recording stopped automatically.", level="WARNING")
-                break
-        video_path = self._recorder.stop()
-        session_dir = self._recorder.session_dir
-        frames_dir = session_dir / "frames" if session_dir else None
-        frame_count = len(list(frames_dir.glob("*.jpg"))) if frames_dir and frames_dir.exists() else 0
-        self._set_state(recording_state="IDLE")
-        self.telemetry_server.send_log(
-            "Recording saved -> {} | {} frames extracted to {}".format(video_path, frame_count, frames_dir)
-        )
-        self._send_status()
-
-    def _stop_recording_local(self) -> Dict[str, Any]:
-        """Signal the recording loop to stop."""
-        if not (self._rec_thread and self._rec_thread.is_alive()):
-            return {"ok": False, "message": "No recording in progress."}
-        self._rec_stop_event.set()
-        self._set_state(recording_state="STOPPING")
-        self._send_status()
-        return {"ok": True, "message": "Stop signal sent. Extracting frames..."}
-
     def _abort_mission(self) -> Dict[str, Any]:
         self._abort_event.set()
         self._set_state(mission_state="ABORT_REQUESTED")
         self.telemetry_server.send_log("Abort requested by operator.", level="WARNING")
         self._send_status()
         return {"ok": True, "message": "Abort requested."}
-
-    def _mapping_progress_update(self, progress_fraction: float) -> None:
-        percentage = max(0.0, min(100.0, progress_fraction * 100.0))
-        self._set_state(mapping_progress=round(percentage, 1))
-        self._send_status()
-
-    def _resolve_takeoff_gps(self) -> Dict[str, float]:
-        with self.state_lock:
-            if self.state.takeoff_latitude is not None and self.state.takeoff_longitude is not None:
-                return {
-                    "latitude": float(self.state.takeoff_latitude),
-                    "longitude": float(self.state.takeoff_longitude),
-                }
-
-        if self.config.mission.home_latitude is not None and self.config.mission.home_longitude is not None:
-            self.logger.info("Using configured home GPS as takeoff reference.")
-            return {
-                "latitude": float(self.config.mission.home_latitude),
-                "longitude": float(self.config.mission.home_longitude),
-            }
-
-        self.logger.info("Fetching takeoff GPS from MAVLink.")
-        mav = MavlinkController(
-            connection_string=self.config.mission.mavlink_connection,
-            baudrate=self.config.mission.mavlink_baudrate,
-            logger=self.logger,
-        )
-        try:
-            mav.connect()
-            gps = mav.get_current_gps(timeout_sec=20)
-            return {
-                "latitude": float(gps["latitude"]),
-                "longitude": float(gps["longitude"]),
-            }
-        except Exception:
-            self._set_state(connection_status="DISCONNECTED")
-            raise
-        finally:
-            try:
-                mav.close()
-            except Exception:
-                pass
 
     def _send_live_telemetry(self, payload: Dict[str, Any]) -> None:
         self.telemetry_server.send_event("TELEMETRY", payload)
@@ -443,5 +399,3 @@ class DroneAcharyaController:
 
     def _send_status(self) -> None:
         self.telemetry_server.send_status(self.get_status_snapshot())
-
-

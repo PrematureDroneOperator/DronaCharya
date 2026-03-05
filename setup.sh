@@ -40,7 +40,7 @@ if missing:
     print("  sudo apt-get install -y python3-opencv python3-numpy")
 PY
 
-mkdir -p data/maps data/detections data/routes data/logs
+mkdir -p data/maps data/detections data/routes data/logs data/recordings data/target_sessions
 
 echo "Setup completed."
 echo "Activate with: source .venv/bin/activate"

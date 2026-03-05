@@ -4,6 +4,9 @@ from typing import Callable, Optional, Tuple
 
 
 VALID_COMMANDS = {
+    "START_SURVEY",
+    "STOP_SURVEY",
+    "BUILD_ROUTE",
     "START_MAPPING",
     "RUN_DETECTION",
     "PLAN_ROUTE",

@@ -13,6 +13,7 @@ Usage:
 import argparse
 import logging
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
@@ -70,6 +71,7 @@ class DroneRecorder:
         self._session_dir = None  # type: Optional[Path]
         self._video_path = None  # type: Optional[Path]
         self._recording = False
+        self._frame_index = 0
 
     @property
     def _is_gst_pipeline(self) -> bool:
@@ -119,21 +121,24 @@ class DroneRecorder:
             )
 
         self._recording = True
+        self._frame_index = 0
         logger.info(
             "Recording started -> %s  [%dx%d @ %d fps]  codec=%s src=%r",
             self._video_path, width, height, self.fps, self.fourcc, self._source,
         )
 
-    def record_frame(self) -> bool:
+    def record_frame(self):
         if not self._recording or self._cap is None or self._writer is None:
-            return False
+            return False, None, self._frame_index, ""
 
         ok, frame = self._cap.read()
         if not ok:
-            return False
+            return False, None, self._frame_index, ""
 
         self._writer.write(frame)
-        return True
+        self._frame_index += 1
+        timestamp_utc = datetime.now(timezone.utc).isoformat()
+        return True, frame, self._frame_index, timestamp_utc
 
     def stop(self) -> Path:
         self._recording = False
@@ -189,7 +194,7 @@ def record_until_stop(
 
     try:
         while True:
-            ok = recorder.record_frame()
+            ok, _, _, _ = recorder.record_frame()
             if not ok:
                 logger.warning("Frame capture failed - stopping.")
                 break
