@@ -311,7 +311,7 @@ class DroneAcharyaController:
     def _recording_loop(self) -> None:
         assert self._recorder is not None
         while not self._rec_stop_event.is_set():
-            ok, _, _, _ = self._recorder.record_frame()
+            ok = self._recorder.record_frame()
             if not ok:
                 self.telemetry_server.send_log("Camera source exhausted - recording stopped automatically.", level="WARNING")
                 break

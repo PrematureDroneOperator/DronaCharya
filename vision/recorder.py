@@ -13,7 +13,6 @@ Usage:
 import argparse
 import logging
 import re
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
@@ -71,75 +70,56 @@ class DroneRecorder:
         self._session_dir = None  # type: Optional[Path]
         self._video_path = None  # type: Optional[Path]
         self._recording = False
-        self._frame_index = 0
 
     @property
     def _is_gst_pipeline(self) -> bool:
         """True when source is a GStreamer pipeline string (not a device index)."""
         return isinstance(self._source, str) and not self._source.startswith(("rtsp://", "http://", "https://"))
-
     def start(self) -> None:
-        # Use the GStreamer backend explicitly for pipeline strings so OpenCV
-        # does not fall back to V4L2 raw capture (which gives green frames when
-        # the camera's native pixel format isn't plain BGR).
-        if self._is_gst_pipeline:
-            self._cap = cv2.VideoCapture(self._source, cv2.CAP_GSTREAMER)
+        if isinstance(self._source, int) or (isinstance(self._source, str) and self._source.isdigit()):
+            dev = int(self._source)
+            # Hardware-accelerated pipeline for Jetson CSI cameras
+            gst_str = (
+                f"nvarguscamerasrc sensor-id={dev} ! "
+                "video/x-raw(memory:NVMM), width=1280, height=720, format=NV12, framerate=60/1 ! "
+                "nvvidconv ! video/x-raw, format=BGRx ! "
+                "videoconvert ! video/x-raw, format=BGR ! "
+                "appsink drop=true max-buffers=1"
+            )
+            self._cap = cv2.VideoCapture(gst_str, cv2.CAP_GSTREAMER)
         else:
             self._cap = cv2.VideoCapture(self._source)
 
         if not self._cap.isOpened():
-            raise RuntimeError(
-                "Cannot open camera source: {!r}\n"
-                "  Hint: if you see green frames with device_id, set stream_url to a "
-                "v4l2src GStreamer pipeline instead (see config/config.yaml).".format(self._source)
-            )
+            raise RuntimeError(f"Cannot open camera: {self._source}")
 
-        # For plain device-index sources, force the camera to output MJPEG.
-        # This avoids the green-frame problem when the camera's native format
-        # is YUYV — OpenCV decodes MJPEG to BGR correctly without GStreamer.
-        if isinstance(self._source, int):
-            self._cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        # IMPORTANT: Grab a test frame to get ACTUAL dimensions
+        ok, test_frame = self._cap.read()
+        if not ok:
+            raise RuntimeError("Opened camera but could not read a frame.")
 
-        self._cap.set(cv2.CAP_PROP_FPS, self.fps)
+        height, width = test_frame.shape[:2] # Reliable way to get dimensions
 
-        width = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
-        height = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
-
+        # Setup Writer
         self._session_dir = _next_session_dir(self.output_dir)
-        # Use the configured container extension so the codec and container match.
         self._video_path = self._session_dir / ("recording" + self.container)
 
         fourcc_code = cv2.VideoWriter_fourcc(*self.fourcc)
         self._writer = cv2.VideoWriter(str(self._video_path), fourcc_code, self.fps, (width, height))
-        if not self._writer.isOpened():
-            raise RuntimeError(
-                "VideoWriter failed to initialize. "
-                "fourcc={!r} container={!r}\n"
-                "  On Jetson try: fourcc=MJPG container=.avi".format(
-                    self.fourcc, self.container
-                )
-            )
 
+        # This MUST be set to True, otherwise record_frame returns False immediately
         self._recording = True
-        self._frame_index = 0
-        logger.info(
-            "Recording started -> %s  [%dx%d @ %d fps]  codec=%s src=%r",
-            self._video_path, width, height, self.fps, self.fourcc, self._source,
-        )
 
-    def record_frame(self):
+    def record_frame(self) -> bool:
         if not self._recording or self._cap is None or self._writer is None:
-            return False, None, self._frame_index, ""
+            return False
 
         ok, frame = self._cap.read()
         if not ok:
-            return False, None, self._frame_index, ""
+            return False
 
         self._writer.write(frame)
-        self._frame_index += 1
-        timestamp_utc = datetime.now(timezone.utc).isoformat()
-        return True, frame, self._frame_index, timestamp_utc
-
+        return True
     def stop(self) -> Path:
         self._recording = False
         if self._writer is not None:
@@ -194,7 +174,7 @@ def record_until_stop(
 
     try:
         while True:
-            ok, _, _, _ = recorder.record_frame()
+            ok = recorder.record_frame()
             if not ok:
                 logger.warning("Frame capture failed - stopping.")
                 break
@@ -236,3 +216,6 @@ if __name__ == "__main__":
         stop_key=args.stop_key,
     )
     print("\nDone!\n  Video   : {}\n  Session : {}".format(video, session))
+
+
+#recorder.py

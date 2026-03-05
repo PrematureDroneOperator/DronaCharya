@@ -175,6 +175,7 @@ class MavTunnelBridge:
                 source_system=self.source_system,
                 source_component=self.source_component,
                 autoreconnect=False,
+                mavlink2=True,  # TUNNEL (msg 385) is MAVLink v2 only
             )
         except Exception as exc:
             LOG.error("Unable to open MAVLink port %s: %s", self.port, exc)
@@ -192,12 +193,21 @@ class MavTunnelBridge:
                 pass
             return False
 
+        # Force MAVLink v2 framing — TUNNEL (msg 385) is v2-only.
+        # mavlink_connection(mavlink2=True) sets this at init; we belt-and-suspenders
+        # it here because some pymavlink builds ignore the kwarg on serial connections.
+        try:
+            mav.mav.protocol_marker = 0xFD  # STX byte for MAVLink v2
+        except AttributeError:
+            pass  # older pymavlink — mavlink2=True kwarg should be sufficient
+
         with self._mav_lock:
             self._mav = mav
 
         self._mav_error.clear()
         self._mav_ready.set()
-        LOG.info("MAVLink link ready on %s", self.port)
+        LOG.info("MAVLink link ready on %s (v%s)", self.port,
+                 "2" if getattr(mav.mav, "protocol_marker", 0xFD) == 0xFD else "1")
         LOG.info("  UDP listen : %s:%d -> MAV tunnel (%s)", LOCALHOST, self._udp_listen_port, _channel_name(self._tx_channel))
         LOG.info("  MAV tunnel (%s) -> UDP send %s:%d", _channel_name(self._rx_channel), LOCALHOST, self._udp_send_port)
         return True
@@ -255,6 +265,7 @@ class MavTunnelBridge:
     def _send_tunnel_payload(self, payload: bytes, channel: int) -> bool:
         mav = self._get_mav()
         if mav is None:
+            LOG.warning("[UDP->MAV:%s] MAV not ready, payload dropped (%d bytes)", _channel_name(channel), len(payload))
             return False
         msg_id = self._next_message_id()
         parts = [payload[i : i + FRAME_DATA_MAX] for i in range(0, len(payload), FRAME_DATA_MAX)] or [b""]
@@ -264,6 +275,18 @@ class MavTunnelBridge:
             header = struct.pack(FRAME_HEADER_FMT, FRAME_MAGIC, channel, msg_id, idx, total_parts)
             frame = header + part
             padded = frame + (b"\x00" * (TUNNEL_PAYLOAD_MAX - len(frame)))
+
+            if self.verbose:
+                LOG.debug(
+                    "[UDP->MAV:%s] sending msg=%d part=%d/%d bytes=%d tgt=%d.%d",
+                    _channel_name(channel),
+                    msg_id,
+                    idx,
+                    total_parts,
+                    len(part),
+                    self.target_system,
+                    self.target_component,
+                )
 
             try:
                 with self._mav_write_lock:
@@ -275,23 +298,21 @@ class MavTunnelBridge:
                         padded,
                     )
             except Exception as exc:
+                LOG.error(
+                    "[UDP->MAV:%s] tunnel_send FAILED msg=%d part=%d/%d: %s",
+                    _channel_name(channel), msg_id, idx, total_parts, exc
+                )
                 self._mark_mav_error("MAV tunnel send error", exc)
                 return False
 
-            if self.verbose:
-                LOG.debug(
-                    "[UDP->MAV:%s] msg=%d part=%d/%d bytes=%d",
-                    _channel_name(channel),
-                    msg_id,
-                    idx,
-                    total_parts,
-                    len(part),
-                )
         return True
 
     def _udp_to_mav_loop(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Do NOT set SO_REUSEADDR here: if another process (e.g. the drone app running
+        # locally for testing) is already on this port, SO_REUSEADDR lets both bind
+        # successfully on Windows but only one receives packets — silent packet loss.
+        # Without it, bind() raises OSError immediately and the error is explicit.
         try:
             sock.bind((LOCALHOST, self._udp_listen_port))
         except OSError as exc:
@@ -324,6 +345,12 @@ class MavTunnelBridge:
             if not payload:
                 continue
 
+            # Log receipt unconditionally — BEFORE any mav_ready guard — so we can
+            # always confirm the socket received the packet even if MAVLink is down.
+            if self.verbose:
+                LOG.debug("[UDP:%d->MAV] received from %s bytes=%d payload=%r",
+                          self._udp_listen_port, addr, len(payload), payload[:40])
+
             if not self._mav_ready.is_set():
                 self._queue_udp_payload(payload)
                 if not warned_link_down:
@@ -339,9 +366,6 @@ class MavTunnelBridge:
             if not self._send_tunnel_payload(payload, self._tx_channel):
                 self._queue_udp_payload(payload)
                 continue
-
-            if self.verbose:
-                LOG.debug("[UDP:%d->MAV] from %s bytes=%d", self._udp_listen_port, addr, len(payload))
         sock.close()
 
     def _parse_tunnel_frame(self, msg) -> Optional[Tuple[int, int, int, int, bytes, int]]:
