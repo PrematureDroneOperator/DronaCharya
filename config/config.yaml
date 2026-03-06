@@ -45,6 +45,9 @@ mapping:
   meters_per_pixel: 0.05
 
 vision:
+  # Python 3.6 Jetson fallback:
+  # if ultralytics is unavailable and this path is .pt,
+  # detector auto-tries sibling .onnx (same basename).
   model_path: "models/target_yolo.pt"
   conf_threshold: 0.10
   target_class_name: "targetrotation"   # ← match your class name

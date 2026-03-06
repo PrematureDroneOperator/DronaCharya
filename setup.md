@@ -35,6 +35,20 @@ Local UDP ports remain:
 - Jetson-to-Pixhawk serial device identified (`/dev/ttyTHS1`, `/dev/ttyUSB0`, etc.)
 - Pixhawk serial links set to MAVLink (`SERIALx_PROTOCOL=2` recommended for MAVLink2/TUNNEL support)
 
+### Python 3.6 Jetson Note (No Ultralytics)
+
+If Jetson stays on Python 3.6, install/use ONNX runtime via OpenCV DNN:
+
+1. On laptop (where ultralytics works), export once:
+
+```bash
+python -c "from ultralytics import YOLO; YOLO('models/target_yolo.pt').export(format='onnx', imgsz=640, opset=12, simplify=True)"
+```
+
+2. Copy `models/target_yolo.onnx` to Jetson `models/`.
+3. Keep `vision.model_path` as `.pt` or set to `.onnx`.
+   - If `.pt` is configured but ultralytics is missing, detector now auto-tries sibling `.onnx`.
+
 ## 2. Configure `config/config.yaml` on Jetson
 
 Keep telemetry local because bridge handles transport:
