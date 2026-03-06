@@ -39,6 +39,7 @@ class SurveyConfig:
     graph_canvas_px: int = 1200
     graph_margin_px: int = 60
     min_gps_fix_type: int = 3
+    center_region_ratio: float = 0.4
 
 
 @dataclass

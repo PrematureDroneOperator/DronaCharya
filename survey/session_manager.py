@@ -146,6 +146,7 @@ class SurveySessionManager:
         self._frame_count = 0
         self._dropped_frame_count = 0
         self._gps_skipped_count = 0
+        self._center_skipped_count = 0
         self._raw_detections = []  # type: List[Dict[str, Any]]
         self._latest_gps = None  # type: Optional[Dict[str, Any]]
         self._start_position = None  # type: Optional[Dict[str, float]]
@@ -190,6 +191,7 @@ class SurveySessionManager:
             self._frame_count = 0
             self._dropped_frame_count = 0
             self._gps_skipped_count = 0
+            self._center_skipped_count = 0
             self._raw_detections = []
             self._latest_gps = None
             self._start_position = None
@@ -331,6 +333,13 @@ class SurveySessionManager:
                 self._current_video_path = video_path
 
     def _detect_loop(self) -> None:
+        # Pre-compute center-region boundaries once.
+        ratio = max(0.0, min(1.0, float(self.config.survey.center_region_ratio)))
+        fw = float(self.config.camera.frame_width)
+        fh = float(self.config.camera.frame_height)
+        margin_x = fw * (1.0 - ratio) / 2.0
+        margin_y = fh * (1.0 - ratio) / 2.0
+
         while True:
             if self._detect_stop_event.is_set() and self._frame_queue.empty():
                 break
@@ -344,6 +353,12 @@ class SurveySessionManager:
                 self.logger.warning("Frame detection failed: %s", exc)
                 continue
             for detection in detections:
+                px = float(detection.get("pixel_x", 0.0))
+                py = float(detection.get("pixel_y", 0.0))
+                if px < margin_x or px > fw - margin_x or py < margin_y or py > fh - margin_y:
+                    with self._state_lock:
+                        self._center_skipped_count += 1
+                    continue
                 self._append_raw_detection(frame_idx, frame_ts, detection)
 
     def _gps_loop(self) -> None:
@@ -458,6 +473,7 @@ class SurveySessionManager:
         with self._state_lock:
             is_current_session = self._current_session_dir == session_dir
             gps_skipped_count = int(self._gps_skipped_count) if is_current_session else int(metadata.get("gps_skipped_count", 0))
+            center_skipped_count = int(self._center_skipped_count) if is_current_session else int(metadata.get("center_skipped_count", 0))
             frame_count = int(self._frame_count) if is_current_session else int(metadata.get("frame_count", 0))
             dropped_frame_count = (
                 int(self._dropped_frame_count) if is_current_session else int(metadata.get("dropped_frame_count", 0))
@@ -477,6 +493,8 @@ class SurveySessionManager:
                 "frame_count": frame_count,
                 "dropped_frame_count": dropped_frame_count,
                 "gps_skipped_count": gps_skipped_count,
+                "center_skipped_count": center_skipped_count,
+                "center_region_ratio": float(self.config.survey.center_region_ratio),
                 "raw_detection_count": len(raw),
                 "unique_target_count": len(unique_targets),
                 "start_position": start_position,

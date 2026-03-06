@@ -58,6 +58,7 @@ survey:
   graph_canvas_px: 1200
   graph_margin_px: 60
   min_gps_fix_type: 3
+  center_region_ratio: 0.4   # fraction of frame (0‑1) around center that counts for geotagging
 
 mission:
   default_altitude_m: 15.0
