@@ -6,7 +6,7 @@ camera:
   # On Jetson, cv2.VideoCapture(0) often gives GREEN FRAMES because OpenCV
   # can't negotiate the camera's native pixel format (YUYV/MJPEG) over V4L2.
   # Use a GStreamer pipeline in stream_url to force proper format conversion.
-  device_id: 0
+  device_id: 1
 
   # ── Active source ─────────────────────────────────────────────────────────
   # Blank = use device_id above (recommended — recorder forces MJPG capture
@@ -46,7 +46,7 @@ mapping:
 
 vision:
   model_path: "models/target_yolo.pt"
-  conf_threshold: 0.35
+  conf_threshold: 0.10
   target_class_name: "targetrotation"   # ← match your class name
   image_size: 640
 

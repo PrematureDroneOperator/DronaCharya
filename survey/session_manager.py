@@ -311,7 +311,7 @@ class SurveySessionManager:
         every_n = max(1, int(self.config.survey.inference_every_n))
         try:
             while not self._record_stop_event.is_set():
-                ok, frame, frame_idx, frame_ts = recorder.record_frame()
+                ok, frame, frame_idx, frame_ts = recorder.record_frame(include_frame=True)
                 if not ok:
                     break
                 with self._state_lock:
@@ -333,12 +333,7 @@ class SurveySessionManager:
                 self._current_video_path = video_path
 
     def _detect_loop(self) -> None:
-        # Pre-compute center-region boundaries once.
         ratio = max(0.0, min(1.0, float(self.config.survey.center_region_ratio)))
-        fw = float(self.config.camera.frame_width)
-        fh = float(self.config.camera.frame_height)
-        margin_x = fw * (1.0 - ratio) / 2.0
-        margin_y = fh * (1.0 - ratio) / 2.0
 
         while True:
             if self._detect_stop_event.is_set() and self._frame_queue.empty():
@@ -352,6 +347,12 @@ class SurveySessionManager:
             except Exception as exc:
                 self.logger.warning("Frame detection failed: %s", exc)
                 continue
+
+            frame_h, frame_w = frame.shape[:2]
+            fw = float(frame_w)
+            fh = float(frame_h)
+            margin_x = fw * (1.0 - ratio) / 2.0
+            margin_y = fh * (1.0 - ratio) / 2.0
             for detection in detections:
                 px = float(detection.get("pixel_x", 0.0))
                 py = float(detection.get("pixel_y", 0.0))
@@ -485,11 +486,16 @@ class SurveySessionManager:
                 metadata.get("recording_video", "")
             )
 
+        recording_video_path = self._resolve_recording_video_path(recording_video, recording_session)
+        detected_video_path = self._write_detected_video(session_dir, recording_video_path, raw)
+
         metadata.update(
             {
                 "survey_ended_utc": _utc_now_iso(),
                 "recording_session": metadata.get("recording_session", recording_session),
-                "recording_video": metadata.get("recording_video", recording_video) or recording_video,
+                "recording_video": str(recording_video_path) if recording_video_path else (
+                    metadata.get("recording_video", recording_video) or recording_video
+                ),
                 "frame_count": frame_count,
                 "dropped_frame_count": dropped_frame_count,
                 "gps_skipped_count": gps_skipped_count,
@@ -508,6 +514,7 @@ class SurveySessionManager:
                     "unique_csv": str(session_dir / "unique_targets.csv"),
                     "unique_json": str(session_dir / "unique_targets.json"),
                     "route_json": str(session_dir / "route_tsp_cycle.json"),
+                    "detected_video": str(detected_video_path) if detected_video_path else "",
                 },
             }
         )
@@ -518,12 +525,14 @@ class SurveySessionManager:
             "message": "Survey session finalized.",
             "session_dir": str(session_dir),
             "recording_session": metadata.get("recording_session", ""),
+            "recording_video": metadata.get("recording_video", ""),
             "raw_count": len(raw),
             "unique_count": len(unique_targets),
             "gps_skipped_count": gps_skipped_count,
             "route_path": str(session_dir / "route_tsp_cycle.json"),
             "raw_graph": str(raw_graph_path),
             "tsp_graph": str(tsp_graph_path),
+            "detected_video": str(detected_video_path) if detected_video_path else "",
             "waypoints": route_payload.get("waypoints", []),
             "route": route_payload,
         }
@@ -552,6 +561,124 @@ class SurveySessionManager:
                     rows.append(row)
             return rows
         return []
+
+    def _resolve_recording_video_path(self, recording_video: str, recording_session: str) -> Optional[Path]:
+        candidates = []  # type: List[Path]
+        if recording_video:
+            candidates.append(Path(recording_video))
+        if recording_session:
+            session_path = Path(recording_session)
+            candidates.append(session_path / ("recording" + self.config.camera.container))
+            candidates.append(session_path / "recording.avi")
+            candidates.append(session_path / "recording.mp4")
+
+        for candidate in candidates:
+            path = candidate if candidate.is_absolute() else (self.config.paths.base_dir / candidate)
+            if path.exists() and path.is_file():
+                return path
+        return None
+
+    def _write_detected_video(
+        self,
+        session_dir: Path,
+        recording_video_path: Optional[Path],
+        raw: List[Dict[str, Any]],
+    ) -> Optional[Path]:
+        if recording_video_path is None:
+            self.logger.warning("Detected-video export skipped: recording video path unavailable.")
+            return None
+
+        extension = self.config.camera.container if str(self.config.camera.container).startswith(".") else ".avi"
+        detected_video_path = session_dir / ("recording_detected" + extension)
+        if detected_video_path.exists():
+            return detected_video_path
+
+        cap = cv2.VideoCapture(str(recording_video_path))
+        if not cap.isOpened():
+            self.logger.warning("Detected-video export skipped: cannot open %s", recording_video_path)
+            return None
+
+        writer = None
+        try:
+            fps = float(cap.get(cv2.CAP_PROP_FPS))
+            if fps <= 1e-6:
+                fps = 30.0
+
+            ok, first_frame = cap.read()
+            if not ok or first_frame is None:
+                self.logger.warning("Detected-video export skipped: empty recording %s", recording_video_path)
+                return None
+
+            frame_h, frame_w = first_frame.shape[:2]
+            writer = cv2.VideoWriter(
+                str(detected_video_path),
+                cv2.VideoWriter_fourcc(*self.config.camera.fourcc),
+                fps,
+                (frame_w, frame_h),
+            )
+            if not writer.isOpened():
+                writer.release()
+                writer = cv2.VideoWriter(
+                    str(detected_video_path),
+                    cv2.VideoWriter_fourcc(*"MJPG"),
+                    fps,
+                    (frame_w, frame_h),
+                )
+            if not writer.isOpened():
+                self.logger.warning("Detected-video export skipped: could not create writer for %s", detected_video_path)
+                return None
+
+            detections_by_frame = {}  # type: Dict[int, List[Dict[str, Any]]]
+            for row in raw:
+                try:
+                    frame_idx = int(float(row.get("frame_idx", 0)))
+                except (TypeError, ValueError):
+                    continue
+                if frame_idx <= 0:
+                    continue
+
+                try:
+                    x1 = float(row.get("bbox_x1", 0.0))
+                    y1 = float(row.get("bbox_y1", 0.0))
+                    x2 = float(row.get("bbox_x2", 0.0))
+                    y2 = float(row.get("bbox_y2", 0.0))
+                    px = float(row.get("pixel_x", 0.0))
+                    py = float(row.get("pixel_y", 0.0))
+                    conf = float(row.get("confidence", 0.0))
+                except (TypeError, ValueError):
+                    continue
+
+                detection = {
+                    "class_name": str(row.get("class_name", "")),
+                    "confidence": conf,
+                    "pixel_x": px,
+                    "pixel_y": py,
+                    "bbox_xyxy": [x1, y1, x2, y2],
+                }
+                detections_by_frame.setdefault(frame_idx, []).append(detection)
+
+            frame_idx = 1
+            first_detections = detections_by_frame.get(frame_idx, [])
+            first_annotated = self.detector.annotate_frame(first_frame, first_detections) if first_detections else first_frame
+            writer.write(first_annotated if first_annotated is not None else first_frame)
+
+            while True:
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                frame_idx += 1
+                detections = detections_by_frame.get(frame_idx, [])
+                annotated = self.detector.annotate_frame(frame, detections) if detections else frame
+                writer.write(annotated if annotated is not None else frame)
+        finally:
+            cap.release()
+            if writer is not None:
+                writer.release()
+
+        if detected_video_path.exists():
+            self.logger.info("Detected-video export complete: %s", detected_video_path)
+            return detected_video_path
+        return None
 
     def _resolve_start_position(self, metadata: Dict[str, Any], raw: List[Dict[str, Any]]) -> Dict[str, float]:
         saved = metadata.get("start_position", {})

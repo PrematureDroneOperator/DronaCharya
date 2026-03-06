@@ -130,7 +130,7 @@ Both sides must target each other correctly.
 
 ## 9. Quick Health Test
 
-On GCS (with both bridges + drone app running):
+On GCS (with both bridges + drone app runnindg):
 
 ```powershell
 python -c "

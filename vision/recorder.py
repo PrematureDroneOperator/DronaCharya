@@ -13,6 +13,7 @@ Usage:
 import argparse
 import logging
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
@@ -21,6 +22,10 @@ import cv2
 from vision.frame_extractor import FrameExtractor
 
 logger = logging.getLogger(__name__)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _next_session_dir(base_dir: Path) -> Path:
@@ -70,6 +75,8 @@ class DroneRecorder:
         self._session_dir = None  # type: Optional[Path]
         self._video_path = None  # type: Optional[Path]
         self._recording = False
+        self._frame_index = 0
+        self._pending_frame = None
 
     @property
     def _is_gst_pipeline(self) -> bool:
@@ -106,20 +113,42 @@ class DroneRecorder:
 
         fourcc_code = cv2.VideoWriter_fourcc(*self.fourcc)
         self._writer = cv2.VideoWriter(str(self._video_path), fourcc_code, self.fps, (width, height))
+        if not self._writer.isOpened():
+            raise RuntimeError("Could not open video writer for: {0}".format(self._video_path))
+
+        # Preserve the first successfully read frame so survey detection sees
+        # exactly the same first frame that is written to disk.
+        self._pending_frame = test_frame
+        self._frame_index = 0
 
         # This MUST be set to True, otherwise record_frame returns False immediately
         self._recording = True
 
-    def record_frame(self) -> bool:
+    def record_frame(self, include_frame: bool = False):
         if not self._recording or self._cap is None or self._writer is None:
+            if include_frame:
+                return False, None, int(self._frame_index), _utc_now_iso()
             return False
 
-        ok, frame = self._cap.read()
+        if self._pending_frame is not None:
+            frame = self._pending_frame
+            self._pending_frame = None
+            ok = True
+        else:
+            ok, frame = self._cap.read()
+
         if not ok:
+            if include_frame:
+                return False, None, int(self._frame_index), _utc_now_iso()
             return False
 
+        frame_ts = _utc_now_iso()
         self._writer.write(frame)
+        self._frame_index += 1
+        if include_frame:
+            return True, frame, int(self._frame_index), frame_ts
         return True
+
     def stop(self) -> Path:
         self._recording = False
         if self._writer is not None:
@@ -128,6 +157,7 @@ class DroneRecorder:
         if self._cap is not None:
             self._cap.release()
             self._cap = None
+        self._pending_frame = None
 
         logger.info("Recording stopped. Video saved to %s", self._video_path)
 

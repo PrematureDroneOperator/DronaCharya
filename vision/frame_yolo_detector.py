@@ -24,6 +24,8 @@ class FrameYoloDetector:
         self.config = config
         self.logger = logger
         self._model: Any = None
+        self._target_filter_checked = False
+        self._logged_runtime = False
 
     def detect_frame(self, frame) -> List[Dict[str, Any]]:
         if frame is None:
@@ -35,26 +37,65 @@ class FrameYoloDetector:
         device = 0 if torch is not None and torch.cuda.is_available() else "cpu"
         infer_half = bool(torch is not None and torch.cuda.is_available())
 
+        if not self._logged_runtime:
+            self.logger.info("Frame YOLO inference runtime: device=%s half=%s", device, infer_half)
+            self._logged_runtime = True
+
         # Defensive copy because the recorder thread reuses frame buffers.
         frame_for_infer = frame.copy()
-        results = model.predict(
-            source=frame_for_infer,
-            conf=self.config.vision.conf_threshold,
-            imgsz=self.config.vision.image_size,
-            device=device,
-            half=infer_half,
-            verbose=False,
-        )
+        try:
+            results = model.predict(
+                source=frame_for_infer,
+                conf=self.config.vision.conf_threshold,
+                imgsz=self.config.vision.image_size,
+                device=device,
+                half=infer_half,
+                verbose=False,
+            )
+        except Exception:
+            if device == "cpu":
+                raise
+            self.logger.warning("Frame YOLO GPU inference failed. Falling back to CPU for this frame.", exc_info=True)
+            results = model.predict(
+                source=frame_for_infer,
+                conf=self.config.vision.conf_threshold,
+                imgsz=self.config.vision.image_size,
+                device="cpu",
+                half=False,
+                verbose=False,
+            )
         if not results:
             return []
 
         result = results[0]
         class_names = result.names
+        if not self._target_filter_checked:
+            self._target_filter_checked = True
+            target_class = str(self.config.vision.target_class_name or "").strip()
+            if isinstance(class_names, dict):
+                available_names = set(class_names.values())
+            elif isinstance(class_names, (list, tuple)):
+                available_names = set(str(name) for name in class_names)
+            else:
+                available_names = set()
+            if target_class and target_class not in available_names:
+                self.logger.warning(
+                    "Configured target_class_name '%s' not found in model classes: %s",
+                    target_class,
+                    sorted(available_names),
+                )
+
+        if isinstance(class_names, dict):
+            resolve_class_name = lambda cls_id: class_names.get(cls_id, str(cls_id))
+        elif isinstance(class_names, (list, tuple)):
+            resolve_class_name = lambda cls_id: str(class_names[cls_id]) if 0 <= cls_id < len(class_names) else str(cls_id)
+        else:
+            resolve_class_name = lambda cls_id: str(cls_id)
         detections = []  # type: List[Dict[str, Any]]
 
         for box in result.boxes:
             cls_id = int(box.cls.item())
-            cls_name = class_names.get(cls_id, str(cls_id))
+            cls_name = resolve_class_name(cls_id)
             if self.config.vision.target_class_name and cls_name != self.config.vision.target_class_name:
                 continue
 
