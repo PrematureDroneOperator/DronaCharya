@@ -47,8 +47,9 @@ mapping:
 vision:
   model_path: "models/target_yolo.pt"
   conf_threshold: 0.35
-  target_class_name: "target"
+  target_class_name: "targetrotation"   # ← match your class name
   image_size: 640
+
 
 survey:
   sessions_dir: "data/target_sessions"
