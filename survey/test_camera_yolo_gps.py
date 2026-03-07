@@ -81,6 +81,7 @@ class GPSMonitor:
         self._connected = False
         self._updates = 0
         self._errors = 0
+        self._udp_hint_logged = False
 
     def start(self) -> None:
         self._stop_event.clear()
@@ -129,6 +130,13 @@ class GPSMonitor:
                         self._errors += 1
                         self._connected = False
                     self.logger.warning("GPS monitor connect failed: %s", exc)
+                    if (not self._udp_hint_logged) and str(self.connection_string).startswith("udp:127.0.0.1:"):
+                        self._udp_hint_logged = True
+                        self.logger.warning(
+                            "MAVLink source is localhost UDP. Ensure a forwarder is publishing heartbeat to %s, "
+                            "or use direct serial (e.g. /dev/ttyTHS1).",
+                            self.connection_string,
+                        )
                     try:
                         controller.close()
                     except Exception:
@@ -195,6 +203,35 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--preview", action="store_true", help="Show live annotated preview window.")
     parser.add_argument("--log-level", type=str, default="INFO", help="Logging level.")
+    parser.add_argument(
+        "--mavlink-connection",
+        type=str,
+        default="",
+        help="Override MAVLink connection string (default: mission.mavlink_connection from config).",
+    )
+    parser.add_argument(
+        "--mavlink-baudrate",
+        type=int,
+        default=0,
+        help="Override MAVLink baudrate (default: mission.mavlink_baudrate from config).",
+    )
+    parser.add_argument(
+        "--mavlink-test-only",
+        action="store_true",
+        help="Test heartbeat/GPS and exit (no camera recording).",
+    )
+    parser.add_argument(
+        "--mavlink-timeout-sec",
+        type=float,
+        default=15.0,
+        help="Heartbeat wait timeout for --mavlink-test-only.",
+    )
+    parser.add_argument(
+        "--mavlink-gps-samples",
+        type=int,
+        default=3,
+        help="Number of GPS samples to print in --mavlink-test-only mode.",
+    )
     return parser
 
 
@@ -241,6 +278,57 @@ def _draw_overlay(
         cv2.putText(frame, line, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (250, 250, 250), 1, cv2.LINE_AA)
 
 
+def _run_mavlink_probe(
+    connection_string: str,
+    baudrate: int,
+    min_fix_type: int,
+    timeout_sec: float,
+    gps_samples: int,
+    logger: logging.Logger,
+) -> int:
+    logger.info("MAVLink probe: connection=%s baud=%s min_fix_type=%s", connection_string, baudrate, min_fix_type)
+    controller = MavlinkController(connection_string=connection_string, baudrate=int(baudrate), logger=logger)
+    heartbeat_timeout = max(1, int(round(float(timeout_sec))))
+    try:
+        controller.connect(timeout_sec=heartbeat_timeout)
+    except Exception as exc:
+        logger.error("MAVLink heartbeat test failed: %s", exc)
+        if str(connection_string).startswith("udp:127.0.0.1:"):
+            logger.error(
+                "No local UDP heartbeat source on %s. Start a MAVLink forwarder or switch to serial /dev/tty*.",
+                connection_string,
+            )
+        return 2
+
+    logger.info("Heartbeat OK.")
+
+    collected = 0
+    deadline = time.time() + max(5.0, float(timeout_sec))
+    try:
+        while collected < max(1, int(gps_samples)) and time.time() < deadline:
+            msg = controller.recv_match("GPS_RAW_INT", timeout=1.0)
+            if msg is None:
+                continue
+            fix_type = int(getattr(msg, "fix_type", 0))
+            lat = float(getattr(msg, "lat", 0.0)) / 1e7
+            lon = float(getattr(msg, "lon", 0.0)) / 1e7
+            alt_m = float(getattr(msg, "alt", 0.0)) / 1000.0
+            logger.info("GPS sample %s: fix=%s lat=%.7f lon=%.7f alt=%.2fm", collected + 1, fix_type, lat, lon, alt_m)
+            if fix_type >= int(min_fix_type):
+                collected += 1
+
+        if collected == 0:
+            logger.warning("No GPS samples with fix_type >= %s received before timeout.", int(min_fix_type))
+            return 3
+        logger.info("MAVLink probe passed with %s GPS samples.", collected)
+        return 0
+    finally:
+        try:
+            controller.close()
+        except Exception:
+            pass
+
+
 def main() -> int:
     args = _build_parser().parse_args()
     logging.basicConfig(
@@ -263,11 +351,23 @@ def main() -> int:
     source = str(args.source).strip() or config.camera.stream_url.strip() or str(config.camera.device_id)
     inference_every_n = max(1, int(args.inference_every_n) if int(args.inference_every_n) > 0 else int(config.survey.inference_every_n))
     min_fix_type = int(args.min_gps_fix_type) if int(args.min_gps_fix_type) > 0 else int(config.survey.min_gps_fix_type)
+    mavlink_connection = str(args.mavlink_connection).strip() or str(config.mission.mavlink_connection)
+    mavlink_baudrate = int(args.mavlink_baudrate) if int(args.mavlink_baudrate) > 0 else int(config.mission.mavlink_baudrate)
+
+    if args.mavlink_test_only:
+        return _run_mavlink_probe(
+            connection_string=mavlink_connection,
+            baudrate=mavlink_baudrate,
+            min_fix_type=min_fix_type,
+            timeout_sec=float(args.mavlink_timeout_sec),
+            gps_samples=int(args.mavlink_gps_samples),
+            logger=logger,
+        )
 
     detector = FrameYoloDetector(config, logger)
     gps_monitor = GPSMonitor(
-        connection_string=config.mission.mavlink_connection,
-        baudrate=config.mission.mavlink_baudrate,
+        connection_string=mavlink_connection,
+        baudrate=mavlink_baudrate,
         min_fix_type=min_fix_type,
         logger=logger,
     )
@@ -288,9 +388,11 @@ def main() -> int:
     total_model_detections = 0
     detection_failures = 0
     writer: Optional[cv2.VideoWriter] = None
+    recorder_started = False
 
     try:
         recorder.start()
+        recorder_started = True
         if recorder.session_dir is None:
             raise RuntimeError("Recorder did not create a session directory.")
         session_dir = recorder.session_dir
@@ -427,11 +529,12 @@ def main() -> int:
             writer.release()
         if args.preview:
             cv2.destroyAllWindows()
-        try:
-            raw_video = recorder.stop()
-            raw_video_path = str(raw_video)
-        except Exception:
-            pass
+        if recorder_started:
+            try:
+                raw_video = recorder.stop()
+                raw_video_path = str(raw_video)
+            except Exception:
+                pass
         if raw_video_path:
             logger.info("Raw recording saved: %s", raw_video_path)
 

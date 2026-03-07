@@ -15,7 +15,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 import cv2
 
@@ -82,28 +82,124 @@ class DroneRecorder:
     def _is_gst_pipeline(self) -> bool:
         """True when source is a GStreamer pipeline string (not a device index)."""
         return isinstance(self._source, str) and not self._source.startswith(("rtsp://", "http://", "https://"))
-    def start(self) -> None:
-        if isinstance(self._source, int) or (isinstance(self._source, str) and self._source.isdigit()):
-            dev = int(self._source)
-            # Hardware-accelerated pipeline for Jetson CSI cameras
-            gst_str = (
-                f"nvarguscamerasrc sensor-id={dev} ! "
-                "video/x-raw(memory:NVMM), width=1280, height=720, format=NV12, framerate=60/1 ! "
+
+    def _is_numeric_source(self, source) -> bool:
+        return isinstance(source, int) or (isinstance(source, str) and source.isdigit())
+
+    def _capture_candidates_for_numeric(self, dev: int, include_csi: bool) -> List[Tuple[str, object]]:
+        candidates = []  # type: List[Tuple[str, object]]
+        candidates.append(("index-default[{0}]".format(dev), lambda: cv2.VideoCapture(dev)))
+        if hasattr(cv2, "CAP_V4L2"):
+            candidates.append(("index-v4l2[{0}]".format(dev), lambda: cv2.VideoCapture(dev, cv2.CAP_V4L2)))
+
+        usb_gst_mjpeg = (
+            "v4l2src device=/dev/video{0} ! "
+            "image/jpeg,framerate=30/1 ! jpegdec ! "
+            "videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=1"
+        ).format(dev)
+        candidates.append(("gst-v4l2-usb-mjpeg[{0}]".format(dev), lambda: cv2.VideoCapture(usb_gst_mjpeg, cv2.CAP_GSTREAMER)))
+
+        usb_gst_raw = (
+            "v4l2src device=/dev/video{0} ! "
+            "videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=1"
+        ).format(dev)
+        candidates.append(("gst-v4l2-usb-raw[{0}]".format(dev), lambda: cv2.VideoCapture(usb_gst_raw, cv2.CAP_GSTREAMER)))
+
+        if include_csi:
+            csi_gst = (
+                "nvarguscamerasrc sensor-id={0} ! "
+                "video/x-raw(memory:NVMM), width=1280, height=720, format=NV12, framerate=30/1 ! "
                 "nvvidconv ! video/x-raw, format=BGRx ! "
-                "videoconvert ! video/x-raw, format=BGR ! "
-                "appsink drop=true max-buffers=1"
+                "videoconvert ! video/x-raw, format=BGR ! appsink drop=true max-buffers=1"
+            ).format(dev)
+            candidates.append(("gst-csi-nvargus[{0}]".format(dev), lambda: cv2.VideoCapture(csi_gst, cv2.CAP_GSTREAMER)))
+        return candidates
+
+    def _capture_candidates_for_source(self, source) -> List[Tuple[str, object]]:
+        if self._is_numeric_source(source):
+            dev = int(source)
+            return self._capture_candidates_for_numeric(dev=dev, include_csi=True)
+        if isinstance(source, str):
+            candidates = []  # type: List[Tuple[str, object]]
+            if isinstance(source, str) and self._is_gst_pipeline:
+                candidates.append(("gst-custom", lambda: cv2.VideoCapture(source, cv2.CAP_GSTREAMER)))
+            candidates.append(("source-default", lambda: cv2.VideoCapture(source)))
+            return candidates
+        return [("source-default", lambda: cv2.VideoCapture(source))]
+
+    def _probe_additional_indices(self, preferred_dev: int) -> List[int]:
+        indices = []  # type: List[int]
+        dev_dir = Path("/dev")
+        if dev_dir.exists():
+            for node in sorted(dev_dir.glob("video*")):
+                suffix = node.name.replace("video", "")
+                if suffix.isdigit():
+                    idx = int(suffix)
+                    if idx != preferred_dev and idx not in indices:
+                        indices.append(idx)
+        for idx in (0, 1, 2, 3, 4):
+            if idx != preferred_dev and idx not in indices:
+                indices.append(idx)
+        return indices
+
+    def _try_open_candidates(self, source, candidates: List[Tuple[str, object]], tried: List[str]):
+        for name, opener in candidates:
+            tried.append(name)
+            cap = None
+            try:
+                cap = opener()
+                if cap is None or not cap.isOpened():
+                    if cap is not None:
+                        cap.release()
+                    continue
+
+                if self._is_numeric_source(source):
+                    # Helps many USB cams avoid green frames on Jetson.
+                    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+
+                ok, test_frame = cap.read()
+                if not ok or test_frame is None:
+                    cap.release()
+                    continue
+
+                logger.info("Camera opened using backend candidate: %s", name)
+                return cap, test_frame
+            except Exception:
+                if cap is not None:
+                    try:
+                        cap.release()
+                    except Exception:
+                        pass
+                continue
+        return None, None
+
+    def _open_capture(self):
+        tried = []  # type: List[str]
+        candidates = self._capture_candidates_for_source(self._source)
+        cap, test_frame = self._try_open_candidates(self._source, candidates, tried)
+        if cap is not None and test_frame is not None:
+            return cap, test_frame
+
+        # Auto-probe alternate video nodes when numeric source fails.
+        if self._is_numeric_source(self._source):
+            preferred_dev = int(self._source)
+            for probe_dev in self._probe_additional_indices(preferred_dev):
+                logger.info("Primary camera source %s failed. Auto-probing /dev/video%s", preferred_dev, probe_dev)
+                probe_candidates = self._capture_candidates_for_numeric(dev=probe_dev, include_csi=False)
+                cap, test_frame = self._try_open_candidates(probe_dev, probe_candidates, tried)
+                if cap is not None and test_frame is not None:
+                    self._source = probe_dev
+                    return cap, test_frame
+
+        raise RuntimeError(
+            "Cannot open camera: {0}. Tried: {1}. Check /dev/video* and camera permissions.".format(
+                self._source,
+                ", ".join(tried),
             )
-            self._cap = cv2.VideoCapture(gst_str, cv2.CAP_GSTREAMER)
-        else:
-            self._cap = cv2.VideoCapture(self._source)
+        )
 
-        if not self._cap.isOpened():
-            raise RuntimeError(f"Cannot open camera: {self._source}")
-
-        # IMPORTANT: Grab a test frame to get ACTUAL dimensions
-        ok, test_frame = self._cap.read()
-        if not ok:
-            raise RuntimeError("Opened camera but could not read a frame.")
+    def start(self) -> None:
+        self._cap, test_frame = self._open_capture()
 
         height, width = test_frame.shape[:2] # Reliable way to get dimensions
 
@@ -159,7 +255,8 @@ class DroneRecorder:
             self._cap = None
         self._pending_frame = None
 
-        logger.info("Recording stopped. Video saved to %s", self._video_path)
+        if self._video_path:
+            logger.info("Recording stopped. Video saved to %s", self._video_path)
 
         if self.auto_extract and self._video_path and self._video_path.exists():
             frames_dir = self._session_dir / "frames"

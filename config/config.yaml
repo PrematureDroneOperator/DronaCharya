@@ -66,8 +66,24 @@ survey:
 mission:
   default_altitude_m: 15.0
   hover_time_sec: 5
+  
+  # ──────────────────────────────────────────────────────────────────────────
+  # MAVLINK CONNECTION
+  # ──────────────────────────────────────────────────────────────────────────
+  # Option 1: Direct Serial Connection (Jetson plugged into Pixhawk via GPIO)
+  #   - mavlink_connection: "/dev/ttyTHS1"
+  #   - mavlink_baudrate: 57600 (or 921600 if using Telem2 on Pixhawk)
+  #   * Note: In this mode, telemetry radio CANNOT be used at the same time unless 
+  #     it's plugged into a different Pixhawk port (e.g., Telem1 for radio, Telem2 for Jetson).
+  # 
+  # Option 2: MAVProxy UDP Connection (Recommended for sharing the connection)
+  #   - mavlink_connection: "udp:127.0.0.1:14550"
+  #   - Run this in the background on the Jetson: 
+  #     mavproxy.py --master=/dev/ttyTHS1 --baudrate=57600 --out=udp:127.0.0.1:14550 --out=udp:<gcs_ip>:14550
+  # ──────────────────────────────────────────────────────────────────────────
   mavlink_connection: "udp:127.0.0.1:14550"
   mavlink_baudrate: 57600
+  
   home_latitude: null
   home_longitude: null
   max_mission_duration_sec: 900
