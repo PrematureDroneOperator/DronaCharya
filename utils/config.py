@@ -72,7 +72,7 @@ class LoggingConfig:
 class DetectorServiceConfig:
     host: str = "127.0.0.1"
     port: int = 17660
-    request_timeout_sec: float = 1.5
+    request_timeout_sec: float = 8.0
     connect_timeout_sec: float = 2.0
     jpeg_quality: int = 80
     enabled: bool = True

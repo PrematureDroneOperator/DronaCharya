@@ -10,6 +10,10 @@ class RemoteYoloError(RuntimeError):
     pass
 
 
+class RemoteYoloTimeout(RemoteYoloError):
+    pass
+
+
 class RemoteYoloClient:
     """TCP newline-JSON client for external YOLO detector service."""
 
@@ -106,7 +110,13 @@ class RemoteYoloClient:
             if not bool(response.get("ok", False)):
                 raise RemoteYoloError(str(response.get("error", "Detector service error")))
             return response
-        except (OSError, ValueError) as exc:
+        except socket.timeout as exc:
+            self.close()
+            raise RemoteYoloTimeout("Detector service request timed out: {0}".format(exc))
+        except OSError as exc:
+            self.close()
+            raise RemoteYoloError("Detector service request failed: {0}".format(exc))
+        except ValueError as exc:
             self.close()
             raise RemoteYoloError("Detector service request failed: {0}".format(exc))
 

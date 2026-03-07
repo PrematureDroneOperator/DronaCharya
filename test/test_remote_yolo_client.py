@@ -1,16 +1,18 @@
 import json
 import socket
 import threading
+import time
 import unittest
 
 import numpy as np
 
-from vision.remote_yolo_client import RemoteYoloClient, RemoteYoloError
+from vision.remote_yolo_client import RemoteYoloClient, RemoteYoloError, RemoteYoloTimeout
 
 
 class _StubDetectorServer(object):
-    def __init__(self, send_malformed_first: bool = False) -> None:
+    def __init__(self, send_malformed_first: bool = False, infer_delay_sec: float = 0.0) -> None:
         self.send_malformed_first = bool(send_malformed_first)
+        self.infer_delay_sec = float(max(0.0, infer_delay_sec))
         self._sent_malformed = False
         self._stop_event = threading.Event()
         self._ready_event = threading.Event()
@@ -93,6 +95,8 @@ class _StubDetectorServer(object):
                 elif op == "SESSION_END":
                     response = {"ok": True, "op": "SESSION_END", "session_id": request.get("session_id", "")}
                 elif op == "INFER":
+                    if self.infer_delay_sec > 0.0:
+                        time.sleep(self.infer_delay_sec)
                     response = {
                         "ok": True,
                         "op": "INFER",
@@ -157,6 +161,24 @@ class RemoteYoloClientTest(unittest.TestCase):
             )
             with self.assertRaises(RemoteYoloError):
                 client.ping()
+            client.close()
+        finally:
+            server.stop()
+
+    def test_infer_timeout_raises_timeout_error(self) -> None:
+        server = _StubDetectorServer(send_malformed_first=False, infer_delay_sec=0.4)
+        server.start()
+        try:
+            client = RemoteYoloClient(
+                host="127.0.0.1",
+                port=server.port,
+                request_timeout_sec=0.1,
+                connect_timeout_sec=1.0,
+                jpeg_quality=80,
+            )
+            frame = np.zeros((32, 32, 3), dtype=np.uint8)
+            with self.assertRaises(RemoteYoloTimeout):
+                client.infer(frame=frame, frame_idx=1, frame_ts="2026-01-01T00:00:00Z")
             client.close()
         finally:
             server.stop()

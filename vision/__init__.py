@@ -1,7 +1,7 @@
 # Vision package for dronAcharya.
 from vision.recorder import DroneRecorder, record_until_stop
 from vision.frame_extractor import FrameExtractor
-from vision.remote_yolo_client import RemoteYoloClient, RemoteYoloError
+from vision.remote_yolo_client import RemoteYoloClient, RemoteYoloError, RemoteYoloTimeout
 
 __all__ = [
     "DroneRecorder",
@@ -9,4 +9,5 @@ __all__ = [
     "FrameExtractor",
     "RemoteYoloClient",
     "RemoteYoloError",
+    "RemoteYoloTimeout",
 ]

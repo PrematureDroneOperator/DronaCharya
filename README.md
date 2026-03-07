@@ -242,7 +242,7 @@ Detector IPC settings:
 detector_service:
   host: "127.0.0.1"
   port: 17660
-  request_timeout_sec: 1.5
+  request_timeout_sec: 8.0
   connect_timeout_sec: 2.0
   jpeg_quality: 80
   enabled: true

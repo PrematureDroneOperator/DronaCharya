@@ -16,7 +16,7 @@ from navigation.mavlink_controller import MavlinkController
 from planning.coordinate_transform import CoordinateTransformer
 from planning.tsp_solver import TSPSolver
 from utils.config import AppConfig
-from vision.remote_yolo_client import RemoteYoloClient, RemoteYoloError
+from vision.remote_yolo_client import RemoteYoloClient, RemoteYoloError, RemoteYoloTimeout
 from vision.recorder import DroneRecorder
 
 
@@ -448,6 +448,13 @@ class SurveySessionManager:
 
             try:
                 detections = client.infer(frame=frame, frame_idx=int(frame_idx), frame_ts=str(frame_ts))
+            except RemoteYoloTimeout as exc:
+                with self._state_lock:
+                    self._detector_error_count += 1
+                    self._detector_last_error = str(exc)
+                    self._inference_dropped_count += 1
+                self.logger.warning("Remote detector inference timed out; dropping frame: %s", exc)
+                continue
             except RemoteYoloError as exc:
                 self._on_detector_disconnect(str(exc))
                 continue
