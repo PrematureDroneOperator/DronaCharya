@@ -121,6 +121,33 @@ class GCSApp:
             text="Stop Recording Only",
             command=lambda: self._send_command("STOP_RECORDING"),
         ).grid(row=1, column=1, padx=6, pady=4)
+        
+        gps_test_frame = ttk.LabelFrame(
+            frame,
+            text="GPS Logger Test",
+            padding=10,
+        )
+        gps_test_frame.pack(fill=tk.X, pady=4)
+        ttk.Label(
+            gps_test_frame,
+            text=(
+                "Sends START_GPS_TEST / STOP_GPS_TEST.\n"
+                "Logs continuous simulated GPS data to logs/gps_session_XXXX/."
+            ),
+            foreground="#555",
+            font=("TkDefaultFont", 8, "italic"),
+            justify=tk.LEFT,
+        ).grid(row=0, column=0, columnspan=4, padx=4, pady=(2, 6), sticky=tk.W)
+        ttk.Button(
+            gps_test_frame,
+            text="Start GPS Logger Test",
+            command=lambda: self._send_command("START_GPS_TEST"),
+        ).grid(row=1, column=0, padx=6, pady=4)
+        ttk.Button(
+            gps_test_frame,
+            text="Stop GPS Logger Test",
+            command=lambda: self._send_command("STOP_GPS_TEST"),
+        ).grid(row=1, column=1, padx=6, pady=4)
 
         log_box = ttk.LabelFrame(frame, text="Telemetry Feed", padding=10)
         log_box.pack(fill=tk.BOTH, expand=True, pady=4)

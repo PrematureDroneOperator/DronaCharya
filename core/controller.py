@@ -10,6 +10,8 @@ from telemetry.telemetry_server import TelemetryServer
 from utils.config import AppConfig
 from utils.logger import RingBufferLogHandler
 from vision.recorder import DroneRecorder
+import subprocess
+import os
 
 
 @dataclass
@@ -36,6 +38,7 @@ class AppState:
     detector_error_count: int = 0
     detector_disconnect_count: int = 0
     inference_dropped_count: int = 0
+    detector_hit_count: int = 0
     partial_detection_finalized: bool = False
     detector_last_error: str = ""
     takeoff_latitude: Optional[float] = None
@@ -77,6 +80,9 @@ class DroneAcharyaController:
         self._command_queue = queue.Queue()  # type: queue.Queue
         self._worker_stop = threading.Event()
         self._worker_thread = threading.Thread(target=self._command_worker, name="CommandWorker", daemon=True)
+        
+        # Test GPS Tracker state
+        self._gps_test_process = None
 
     def start(self, mode: str) -> None:
         normalized_mode = mode.upper()
@@ -101,6 +107,7 @@ class DroneAcharyaController:
                 self.survey_manager.stop_survey()
             except Exception:
                 pass
+        self._stop_gps_test()
         self.telemetry_server.stop()
         self.logger.info("dronAcharya stopped.")
 
@@ -187,6 +194,10 @@ class DroneAcharyaController:
             return self._start_mission()
         if command == "ABORT":
             return self._abort_mission()
+        if command == "START_GPS_TEST":
+            return self._start_gps_test()
+        if command == "STOP_GPS_TEST":
+            return self._stop_gps_test()
         if command == "STATUS_REQUEST":
             self._sync_detector_status()
             status = self.get_status_snapshot()
@@ -246,6 +257,7 @@ class DroneAcharyaController:
             unique_target_count=int(result.get("unique_count", 0)),
             detected_targets_count=int(result.get("unique_count", 0)),
             inference_dropped_count=int(result.get("inference_dropped_count", 0)),
+            detector_hit_count=int(result.get("detector_hit_count", 0)),
             detector_service_online=bool(result.get("detector_online", False)),
             detector_error_count=int(result.get("detector_error_count", 0)),
             detector_disconnect_count=int(result.get("detector_disconnect_count", 0)),
@@ -289,6 +301,7 @@ class DroneAcharyaController:
             raw_detection_count=int(result.get("raw_count", 0)),
             unique_target_count=int(result.get("unique_count", 0)),
             inference_dropped_count=int(result.get("inference_dropped_count", 0)),
+            detector_hit_count=int(result.get("detector_hit_count", 0)),
             detector_service_online=bool(result.get("detector_online", False)),
             detector_error_count=int(result.get("detector_error_count", 0)),
             detector_disconnect_count=int(result.get("detector_disconnect_count", 0)),
@@ -443,3 +456,30 @@ class DroneAcharyaController:
             inference_dropped_count=int(status.get("inference_dropped_count", 0)),
             detector_last_error=str(status.get("last_error", "")),
         )
+
+    def _start_gps_test(self) -> Dict[str, Any]:
+        if self._gps_test_process is not None and self._gps_test_process.poll() is None:
+            return {"ok": False, "message": "GPS logging test is already running."}
+            
+        script_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "test_gps_logs.py")
+        try:
+            self._gps_test_process = subprocess.Popen([sys.executable, script_path])
+            self.telemetry_server.send_log("Started continuous GPS logging test.", level="INFO")
+            return {"ok": True, "message": "GPS test started"}
+        except Exception as e:
+            self.logger.error(f"Failed to start GPS test: {e}")
+            return {"ok": False, "message": f"Failed to start GPS test: {e}"}
+
+    def _stop_gps_test(self) -> Dict[str, Any]:
+        if self._gps_test_process is None or self._gps_test_process.poll() is not None:
+            return {"ok": False, "message": "No GPS logging test is running."}
+            
+        try:
+            self._gps_test_process.terminate()
+            self._gps_test_process.wait(timeout=3.0)
+            self._gps_test_process = None
+            self.telemetry_server.send_log("Stopped continuous GPS logging test.", level="INFO")
+            return {"ok": True, "message": "GPS test stopped"}
+        except Exception as e:
+            self.logger.error(f"Failed to stop GPS test: {e}")
+            return {"ok": False, "message": f"Failed to stop GPS test: {e}"}

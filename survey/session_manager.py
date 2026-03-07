@@ -156,6 +156,7 @@ class SurveySessionManager:
         self._detector_last_error = ""
         self._inference_dropped_count = 0
         self._partial_detection = False
+        self._detector_hit_count = 0
 
     def get_detector_status(self) -> Dict[str, Any]:
         with self._state_lock:
@@ -202,6 +203,20 @@ class SurveySessionManager:
                     exc,
                 )
             )
+
+        gps_preflight = None
+        if bool(self.config.survey.gps_preflight_required):
+            try:
+                gps_preflight = self._run_gps_preflight()
+            except Exception as exc:
+                detector_client.close()
+                raise RuntimeError(
+                    "GPS preflight failed on {0} (min_fix_type={1}): {2}".format(
+                        self.config.mission.mavlink_connection,
+                        int(self.config.survey.min_gps_fix_type),
+                        exc,
+                    )
+                )
 
         source = self.config.camera.stream_url.strip() or self.config.camera.device_id
         recorder = DroneRecorder(
@@ -255,14 +270,22 @@ class SurveySessionManager:
             self._gps_skipped_count = 0
             self._center_skipped_count = 0
             self._raw_detections = []
-            self._latest_gps = None
-            self._start_position = None
+            self._latest_gps = dict(gps_preflight) if gps_preflight else None
+            self._start_position = (
+                {
+                    "latitude": float(gps_preflight["latitude"]),
+                    "longitude": float(gps_preflight["longitude"]),
+                }
+                if gps_preflight
+                else None
+            )
             self._detector_online = True
             self._detector_error_count = 0
             self._detector_disconnect_count = 0
             self._detector_last_error = ""
             self._inference_dropped_count = 0
             self._partial_detection = False
+            self._detector_hit_count = 0
 
         self._record_stop_event.clear()
         self._detect_stop_event.clear()
@@ -281,6 +304,9 @@ class SurveySessionManager:
                 "target_class_name": str(self.config.vision.target_class_name),
                 "inference_every_n": int(self.config.survey.inference_every_n),
                 "detection_interval_sec": float(self.config.survey.detection_interval_sec),
+                "gps_preflight_required": bool(self.config.survey.gps_preflight_required),
+                "gps_preflight_timeout_sec": float(self.config.survey.gps_preflight_timeout_sec),
+                "gps_preflight": gps_preflight or {},
                 "dedup_radius_m": float(self.config.survey.dedup_radius_m),
                 "min_gps_fix_type": int(self.config.survey.min_gps_fix_type),
                 "closed_cycle": True,
@@ -298,6 +324,7 @@ class SurveySessionManager:
                 "detector_error_count": 0,
                 "detector_disconnect_count": 0,
                 "inference_dropped_count": 0,
+                "detector_hit_count": 0,
                 "detector_online": True,
                 "detector_last_error": "",
                 "partial_detection_finalized": False,
@@ -347,6 +374,13 @@ class SurveySessionManager:
         try:
             result = self._finalize_session(session_dir)
             self._log("Survey finalized. raw={0} unique={1}".format(result["raw_count"], result["unique_count"]))
+            if int(result.get("raw_count", 0)) == 0 and int(result.get("detector_hit_count", 0)) > 0:
+                self._log(
+                    "Detector saw {0} center hits but raw geotag rows are 0 (gps_skipped={1}).".format(
+                        int(result.get("detector_hit_count", 0)),
+                        int(result.get("gps_skipped_count", 0)),
+                    )
+                )
             return result
         finally:
             self._close_detector_client(session_id=session_dir.name)
@@ -478,6 +512,8 @@ class SurveySessionManager:
                     with self._state_lock:
                         self._center_skipped_count += 1
                     continue
+                with self._state_lock:
+                    self._detector_hit_count += 1
                 self._append_raw_detection(frame_idx, frame_ts, detection)
 
     def _gps_loop(self) -> None:
@@ -543,6 +579,38 @@ class SurveySessionManager:
         with self._state_lock:
             self._gps_controller = None
 
+    def _run_gps_preflight(self) -> Dict[str, Any]:
+        timeout_sec = max(2.0, float(self.config.survey.gps_preflight_timeout_sec))
+        min_fix = int(self.config.survey.min_gps_fix_type)
+        controller = MavlinkController(
+            connection_string=self.config.mission.mavlink_connection,
+            baudrate=self.config.mission.mavlink_baudrate,
+            logger=self.logger,
+        )
+        try:
+            controller.connect(timeout_sec=max(2, int(round(timeout_sec))))
+            deadline = time.time() + timeout_sec
+            while time.time() < deadline:
+                msg = controller.recv_match("GPS_RAW_INT", timeout=1.0)
+                if msg is None:
+                    continue
+                fix_type = int(getattr(msg, "fix_type", 0))
+                if fix_type < min_fix:
+                    continue
+                return {
+                    "latitude": float(getattr(msg, "lat", 0.0)) / 1e7,
+                    "longitude": float(getattr(msg, "lon", 0.0)) / 1e7,
+                    "altitude_m": float(getattr(msg, "alt", 0.0)) / 1000.0,
+                    "fix_type": fix_type,
+                    "timestamp_utc": _utc_now_iso(),
+                }
+            raise RuntimeError("No GPS fix >= {0} before timeout ({1:.1f}s).".format(min_fix, timeout_sec))
+        finally:
+            try:
+                controller.close()
+            except Exception:
+                pass
+
     def _build_detector_client(self) -> RemoteYoloClient:
         return RemoteYoloClient(
             host=self.config.detector_service.host,
@@ -593,10 +661,18 @@ class SurveySessionManager:
     def _append_raw_detection(self, frame_idx: int, frame_ts: str, detection: Dict[str, Any]) -> None:
         with self._state_lock:
             gps = dict(self._latest_gps) if self._latest_gps else None
+        
+        # If no GPS is available, fallback to dummy coordinates so the video exporter
+        # can still read the detection to draw the bounding boxes.
         if gps is None:
             with self._state_lock:
                 self._gps_skipped_count += 1
-            return
+            gps = {
+                "latitude": 0.0,
+                "longitude": 0.0,
+                "fix_type": 0,
+            }
+            
         bbox = detection.get("bbox_xyxy", [0.0, 0.0, 0.0, 0.0])
         row = {
             "frame_idx": int(frame_idx),
@@ -662,6 +738,9 @@ class SurveySessionManager:
             partial_detection = (
                 bool(self._partial_detection) if is_current_session else bool(metadata.get("partial_detection_finalized", False))
             )
+            detector_hit_count = (
+                int(self._detector_hit_count) if is_current_session else int(metadata.get("detector_hit_count", 0))
+            )
             recording_session = str(self._current_recording_session_dir or "") if is_current_session else str(
                 metadata.get("recording_session", "")
             )
@@ -699,6 +778,7 @@ class SurveySessionManager:
                 "detector_error_count": detector_error_count,
                 "detector_disconnect_count": detector_disconnect_count,
                 "detector_last_error": detector_last_error,
+                "detector_hit_count": detector_hit_count,
                 "partial_detection_finalized": partial_detection,
                 "graphs": {
                     "raw_points": str(raw_graph_path),
@@ -731,6 +811,7 @@ class SurveySessionManager:
             "detector_error_count": detector_error_count,
             "detector_disconnect_count": detector_disconnect_count,
             "detector_last_error": detector_last_error,
+            "detector_hit_count": detector_hit_count,
             "partial_detection_finalized": partial_detection,
             "route_path": str(session_dir / "route_tsp_cycle.json"),
             "raw_graph": str(raw_graph_path),
@@ -914,7 +995,13 @@ class SurveySessionManager:
 
     def _cluster_targets(self, raw: List[Dict[str, Any]], radius_m: float) -> List[Dict[str, Any]]:
         clusters = []  # type: List[Dict[str, Any]]
+        min_fix = int(self.config.survey.min_gps_fix_type)
+        
         for row in raw:
+            # Skip invalid GPS coordinates from being routed
+            if int(row.get("gps_fix_type", 0)) < min_fix:
+                continue
+                
             lat = float(row["latitude"])
             lon = float(row["longitude"])
             conf = float(row.get("confidence", 0.0))

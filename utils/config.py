@@ -36,6 +36,8 @@ class SurveyConfig:
     sessions_dir: str = "data/target_sessions"
     inference_every_n: int = 1
     detection_interval_sec: float = 0.5
+    gps_preflight_required: bool = True
+    gps_preflight_timeout_sec: float = 12.0
     dedup_radius_m: float = 3.0
     graph_canvas_px: int = 1200
     graph_margin_px: int = 60
