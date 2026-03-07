@@ -4,10 +4,15 @@
 
 ## Current Mission Flow
 
-The active runtime flow is now session-based:
+The active runtime flow is split across two Python runtimes:
+
+- Native Jetson app (Python 3.6): camera, MAVLink/GPS, survey/session management, route generation, mission execution.
+- Detector service (Python 3.12 conda): YOLO inference over localhost TCP JSON IPC.
+
+Session flow:
 
 1. Start survey from GCS (`START_SURVEY`).
-2. Drone records video locally and runs YOLOv8 in parallel.
+2. Jetson records video locally and streams sampled frames to detector service.
 3. Each valid detection is geotagged with live GPS and stored as raw points.
 4. Stop survey (`STOP_SURVEY`) to auto-finalize:
    - deduplicated target list
@@ -74,6 +79,17 @@ Notes:
 - On Jetson, prefer system OpenCV/NumPy packages.
 
 ## Run
+
+Start detector service (Jetson, Python 3.12 conda):
+
+```bash
+cd dronAcharya
+conda activate <your-py312-env>
+pip install -r requirements-detector.txt
+python3 vision/detector_service.py --config config/config.yaml
+```
+
+Keep this service running before sending `START_SURVEY`.
 
 Drone application:
 
@@ -213,10 +229,23 @@ When `START_MISSION` is triggered:
 survey:
   sessions_dir: "data/target_sessions"
   inference_every_n: 1
+  detection_interval_sec: 0.5
   dedup_radius_m: 3.0
   graph_canvas_px: 1200
   graph_margin_px: 60
   min_gps_fix_type: 3
+```
+
+Detector IPC settings:
+
+```yaml
+detector_service:
+  host: "127.0.0.1"
+  port: 17660
+  request_timeout_sec: 1.5
+  connect_timeout_sec: 2.0
+  jpeg_quality: 80
+  enabled: true
 ```
 
 ## Training Pipeline

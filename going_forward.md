@@ -26,6 +26,7 @@ Before powering on the drone:
 - [ ] Laptop and Jetson are on the same firmware/code version
 - [ ] GPS has a clear sky view (wait for solid GPS fix — usually 2–3 minutes after power-on)
 - [ ] Pixhawk armed and in correct flight mode (GUIDED or AUTO)
+- [ ] Detector service is running on Jetson (`vision/detector_service.py`) in Python 3.12 conda env
 
 ---
 
@@ -42,6 +43,21 @@ Leave this terminal open. You should see:
 ```
 dronAcharya started in MISSION mode.
 ```
+
+---
+
+## Step 1.5 — Start Detector Service (on Jetson, Required)
+
+Open a second terminal on Jetson:
+
+```bash
+cd /home/jetbot/Documents/DronaCharya
+conda activate <your-py312-env>
+python vision/detector_service.py --config config/config.yaml
+```
+
+Leave this terminal running during survey.
+If detector service is offline, **Start Survey** is rejected by design.
 
 ---
 
@@ -163,6 +179,8 @@ The video is saved to `data/recordings/session-XXXX/recording.avi` on the Jetson
 | Commands sent but drone doesn't respond | `main.py` not running on Jetson | SSH to Jetson and restart `main.py` |
 | Bridge shows no `[UDP->MAV:CMD]` log | Another process on port 14560 | Run `netstat -ano \| findstr :14560` — kill the stray `python` PID |
 | Camera fails to open on Jetson | Wrong sensor-id in pipeline | Check `config.yaml → camera.device_id` (usually `0`) |
+| Start Survey fails immediately with detector error | Detector service is not running or wrong host/port | Start `vision/detector_service.py` and verify `config.yaml -> detector_service` |
+| Detector crashes during survey | Conda env/service process stopped | Restart detector service; current survey can still be stopped/finalized with partial detections |
 | No GPS targets detected | Low altitude or no GPS fix | Wait for GPS fix type ≥ 3; fly higher than `config.yaml → survey.min_gps_fix_type` |
 | Mission says "no waypoints" | Survey not completed or route not built | Run **Stop Survey** then **Build Route**, then **Start Mission** |
 

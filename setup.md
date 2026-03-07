@@ -30,6 +30,8 @@ Local UDP ports remain:
 - Python 3.x on both GCS and Jetson
 - Dependencies installed:
   - `pip install -r requirements.txt`
+- Detector service env on Jetson (Python 3.12 conda):
+  - `pip install -r requirements-detector.txt`
 - Serial permissions on Jetson (`dialout` group or equivalent)
 - Ground radio COM port identified (Windows: `COMx`)
 - Jetson-to-Pixhawk serial device identified (`/dev/ttyTHS1`, `/dev/ttyUSB0`, etc.)
@@ -105,6 +107,18 @@ Expected:
 - command listener on `:14560`
 - telemetry server online
 
+## 5.1 Start Detector Service on Jetson (Required Before START_SURVEY)
+
+Run in a separate terminal in your Python 3.12 conda environment:
+
+```bash
+cd ~/DronaCharya
+conda activate <your-py312-env>
+python3 vision/detector_service.py --config config/config.yaml
+```
+
+If this service is not reachable, `START_SURVEY` fails fast.
+
 ## 6. Start GCS App on Laptop
 
 ```powershell
@@ -141,6 +155,10 @@ Both sides must target each other correctly.
 - Ensure Pixhawk link baud matches bridge baud.
 - Ensure both radios are linked and RF quality is healthy.
 - If no packets flow, first verify both bridges show heartbeat/MAVLink link readiness.
+- If survey start fails with detector-service error, verify detector service is running on
+  `detector_service.host:detector_service.port` from `config/config.yaml`.
+- If detector service crashes mid-survey, recording continues and `STOP_SURVEY` finalizes
+  using partial detections with warning status/logs.
 
 ## 9. Quick Health Test
 

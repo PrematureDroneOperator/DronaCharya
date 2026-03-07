@@ -31,6 +31,13 @@ class AppState:
     raw_detection_count: int = 0
     unique_target_count: int = 0
     last_error: str = ""
+    detector_service_endpoint: str = ""
+    detector_service_online: bool = False
+    detector_error_count: int = 0
+    detector_disconnect_count: int = 0
+    inference_dropped_count: int = 0
+    partial_detection_finalized: bool = False
+    detector_last_error: str = ""
     takeoff_latitude: Optional[float] = None
     takeoff_longitude: Optional[float] = None
 
@@ -74,6 +81,7 @@ class DroneAcharyaController:
     def start(self, mode: str) -> None:
         normalized_mode = mode.upper()
         self._set_state(current_mode=normalized_mode, mission_state="READY", last_error="")
+        self._sync_detector_status()
         self._worker_stop.clear()
         self._worker_thread.start()
         self.telemetry_server.start(self._on_remote_command)
@@ -180,6 +188,7 @@ class DroneAcharyaController:
         if command == "ABORT":
             return self._abort_mission()
         if command == "STATUS_REQUEST":
+            self._sync_detector_status()
             status = self.get_status_snapshot()
             self._send_status()
             return {"ok": True, "message": "Status sent", "status": status}
@@ -193,12 +202,15 @@ class DroneAcharyaController:
             result = self.survey_manager.start_survey()
         except Exception:
             self._set_state(mission_state="READY", survey_state="IDLE", recording_state="IDLE")
+            self._sync_detector_status()
             raise
+        self._sync_detector_status()
         self._set_state(
             mission_state="SURVEY_RUNNING",
             survey_state="RUNNING",
             recording_state="RECORDING",
             last_error="",
+            partial_detection_finalized=False,
         )
         self._set_state(
             last_target_session=result.get("session_dir", ""),
@@ -214,6 +226,7 @@ class DroneAcharyaController:
         result = self.survey_manager.stop_survey()
         if not result.get("ok"):
             self._set_state(survey_state="IDLE", recording_state="IDLE")
+            self._sync_detector_status()
             self._send_status()
             return result
 
@@ -232,12 +245,19 @@ class DroneAcharyaController:
             raw_detection_count=int(result.get("raw_count", 0)),
             unique_target_count=int(result.get("unique_count", 0)),
             detected_targets_count=int(result.get("unique_count", 0)),
+            inference_dropped_count=int(result.get("inference_dropped_count", 0)),
+            detector_service_online=bool(result.get("detector_online", False)),
+            detector_error_count=int(result.get("detector_error_count", 0)),
+            detector_disconnect_count=int(result.get("detector_disconnect_count", 0)),
+            detector_last_error=str(result.get("detector_last_error", "")),
+            partial_detection_finalized=bool(result.get("partial_detection_finalized", False)),
             last_route_path=result.get("route_path", ""),
             last_raw_graph_path=result.get("raw_graph", ""),
             last_tsp_graph_path=result.get("tsp_graph", ""),
             takeoff_latitude=start_lat,
             takeoff_longitude=start_lon,
         )
+        self._sync_detector_status()
         self._send_status()
         self.telemetry_server.send_log(
             "Survey complete: raw={0}, unique={1}, route={2}".format(
@@ -246,6 +266,11 @@ class DroneAcharyaController:
                 result.get("route_path", ""),
             )
         )
+        if bool(result.get("partial_detection_finalized", False)):
+            self.telemetry_server.send_log(
+                "Survey finalized with partial detections due to detector service disconnect.",
+                level="WARNING",
+            )
         return result
 
     def _build_route(self) -> Dict[str, Any]:
@@ -263,6 +288,12 @@ class DroneAcharyaController:
             detected_targets_count=int(result.get("unique_count", 0)),
             raw_detection_count=int(result.get("raw_count", 0)),
             unique_target_count=int(result.get("unique_count", 0)),
+            inference_dropped_count=int(result.get("inference_dropped_count", 0)),
+            detector_service_online=bool(result.get("detector_online", False)),
+            detector_error_count=int(result.get("detector_error_count", 0)),
+            detector_disconnect_count=int(result.get("detector_disconnect_count", 0)),
+            detector_last_error=str(result.get("detector_last_error", "")),
+            partial_detection_finalized=bool(result.get("partial_detection_finalized", False)),
             last_target_session=result.get("session_dir", ""),
             last_route_path=result.get("route_path", ""),
             last_raw_graph_path=result.get("raw_graph", ""),
@@ -270,6 +301,7 @@ class DroneAcharyaController:
             takeoff_latitude=float(start_position.get("latitude", 0.0)) if start_position else None,
             takeoff_longitude=float(start_position.get("longitude", 0.0)) if start_position else None,
         )
+        self._sync_detector_status()
         self._send_status()
         self.telemetry_server.send_log("Route ready: {0}".format(result.get("route_path", "")))
         return result
@@ -398,4 +430,16 @@ class DroneAcharyaController:
                     setattr(self.state, key, value)
 
     def _send_status(self) -> None:
+        self._sync_detector_status()
         self.telemetry_server.send_status(self.get_status_snapshot())
+
+    def _sync_detector_status(self) -> None:
+        status = self.survey_manager.get_detector_status()
+        self._set_state(
+            detector_service_endpoint=str(status.get("endpoint", "")),
+            detector_service_online=bool(status.get("online", False)),
+            detector_error_count=int(status.get("error_count", 0)),
+            detector_disconnect_count=int(status.get("disconnect_count", 0)),
+            inference_dropped_count=int(status.get("inference_dropped_count", 0)),
+            detector_last_error=str(status.get("last_error", "")),
+        )

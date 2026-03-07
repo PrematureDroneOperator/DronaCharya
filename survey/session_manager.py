@@ -16,7 +16,7 @@ from navigation.mavlink_controller import MavlinkController
 from planning.coordinate_transform import CoordinateTransformer
 from planning.tsp_solver import TSPSolver
 from utils.config import AppConfig
-from vision.frame_yolo_detector import FrameYoloDetector
+from vision.remote_yolo_client import RemoteYoloClient, RemoteYoloError
 from vision.recorder import DroneRecorder
 
 
@@ -122,7 +122,6 @@ class SurveySessionManager:
         self.logger = logger
         self._telemetry_log = telemetry_log
 
-        self.detector = FrameYoloDetector(config, logger)
         self.tsp_solver = TSPSolver()
         self.transformer = CoordinateTransformer(config.mapping.meters_per_pixel)
 
@@ -138,6 +137,7 @@ class SurveySessionManager:
 
         self._recorder = None  # type: Optional[DroneRecorder]
         self._gps_controller = None  # type: Optional[MavlinkController]
+        self._detector_client = None  # type: Optional[RemoteYoloClient]
 
         self._running = False
         self._current_session_dir = None  # type: Optional[Path]
@@ -150,6 +150,28 @@ class SurveySessionManager:
         self._raw_detections = []  # type: List[Dict[str, Any]]
         self._latest_gps = None  # type: Optional[Dict[str, Any]]
         self._start_position = None  # type: Optional[Dict[str, float]]
+        self._detector_online = False
+        self._detector_error_count = 0
+        self._detector_disconnect_count = 0
+        self._detector_last_error = ""
+        self._inference_dropped_count = 0
+        self._partial_detection = False
+
+    def get_detector_status(self) -> Dict[str, Any]:
+        with self._state_lock:
+            endpoint = "{0}:{1}".format(
+                self.config.detector_service.host,
+                int(self.config.detector_service.port),
+            )
+            return {
+                "enabled": bool(self.config.detector_service.enabled),
+                "endpoint": endpoint,
+                "online": bool(self._detector_online),
+                "error_count": int(self._detector_error_count),
+                "disconnect_count": int(self._detector_disconnect_count),
+                "last_error": str(self._detector_last_error),
+                "inference_dropped_count": int(self._inference_dropped_count),
+            }
 
     @property
     def is_running(self) -> bool:
@@ -166,6 +188,21 @@ class SurveySessionManager:
             if self._running:
                 raise RuntimeError("Survey is already running.")
 
+        if not bool(self.config.detector_service.enabled):
+            raise RuntimeError("Detector service is disabled. Set detector_service.enabled=true before START_SURVEY.")
+
+        detector_client = self._build_detector_client()
+        try:
+            ping_payload = detector_client.ping()
+        except RemoteYoloError as exc:
+            raise RuntimeError(
+                "Detector service unavailable at {0}:{1}: {2}".format(
+                    self.config.detector_service.host,
+                    int(self.config.detector_service.port),
+                    exc,
+                )
+            )
+
         source = self.config.camera.stream_url.strip() or self.config.camera.device_id
         recorder = DroneRecorder(
             source=source,
@@ -175,15 +212,40 @@ class SurveySessionManager:
             container=self.config.camera.container,
             auto_extract=True,
         )
-        recorder.start()
+        try:
+            recorder.start()
+        except Exception:
+            detector_client.close()
+            raise
         if recorder.session_dir is None:
+            detector_client.close()
             raise RuntimeError("Recorder session path is unavailable.")
 
         session_dir = _next_target_session_dir(self.config.paths.target_sessions_dir)
         (session_dir / "graphs").mkdir(parents=True, exist_ok=True)
 
+        try:
+            detector_client.session_start(session_dir.name)
+        except RemoteYoloError as exc:
+            try:
+                recorder.stop()
+            except Exception:
+                pass
+            detector_client.close()
+            raise RuntimeError(
+                "Detector service disconnected before survey start ({0}:{1}): {2}".format(
+                    self.config.detector_service.host,
+                    int(self.config.detector_service.port),
+                    exc,
+                )
+            )
+
+        with self._state_lock:
+            self._clear_frame_queue_locked()
+
         with self._state_lock:
             self._recorder = recorder
+            self._detector_client = detector_client
             self._running = True
             self._current_session_dir = session_dir
             self._current_recording_session_dir = recorder.session_dir
@@ -195,6 +257,12 @@ class SurveySessionManager:
             self._raw_detections = []
             self._latest_gps = None
             self._start_position = None
+            self._detector_online = True
+            self._detector_error_count = 0
+            self._detector_disconnect_count = 0
+            self._detector_last_error = ""
+            self._inference_dropped_count = 0
+            self._partial_detection = False
 
         self._record_stop_event.clear()
         self._detect_stop_event.clear()
@@ -212,12 +280,27 @@ class SurveySessionManager:
                 "conf_threshold": float(self.config.vision.conf_threshold),
                 "target_class_name": str(self.config.vision.target_class_name),
                 "inference_every_n": int(self.config.survey.inference_every_n),
+                "detection_interval_sec": float(self.config.survey.detection_interval_sec),
                 "dedup_radius_m": float(self.config.survey.dedup_radius_m),
                 "min_gps_fix_type": int(self.config.survey.min_gps_fix_type),
                 "closed_cycle": True,
                 "gps_skipped_count": 0,
+                "center_skipped_count": 0,
                 "raw_detection_count": 0,
                 "unique_target_count": 0,
+                "detector_mode": "remote_tcp",
+                "detector_enabled": True,
+                "detector_endpoint": "{0}:{1}".format(
+                    self.config.detector_service.host,
+                    int(self.config.detector_service.port),
+                ),
+                "detector_ping": ping_payload,
+                "detector_error_count": 0,
+                "detector_disconnect_count": 0,
+                "inference_dropped_count": 0,
+                "detector_online": True,
+                "detector_last_error": "",
+                "partial_detection_finalized": False,
                 "graphs": {},
                 "artifacts": {},
             },
@@ -236,6 +319,10 @@ class SurveySessionManager:
             "message": "Survey started. Session: {0}".format(session_dir),
             "session_dir": str(session_dir),
             "recording_session": str(recorder.session_dir),
+            "detector_endpoint": "{0}:{1}".format(
+                self.config.detector_service.host,
+                int(self.config.detector_service.port),
+            ),
         }
 
     def stop_survey(self) -> Dict[str, Any]:
@@ -262,6 +349,7 @@ class SurveySessionManager:
             self._log("Survey finalized. raw={0} unique={1}".format(result["raw_count"], result["unique_count"]))
             return result
         finally:
+            self._close_detector_client(session_id=session_dir.name)
             with self._state_lock:
                 self._running = False
 
@@ -308,7 +396,8 @@ class SurveySessionManager:
         recorder = self._recorder
         if recorder is None:
             return
-        every_n = max(1, int(self.config.survey.inference_every_n))
+        detection_interval_sec = max(0.05, float(self.config.survey.detection_interval_sec))
+        next_detection_ts = 0.0
         try:
             while not self._record_stop_event.is_set():
                 ok, frame, frame_idx, frame_ts = recorder.record_frame(include_frame=True)
@@ -316,13 +405,17 @@ class SurveySessionManager:
                     break
                 with self._state_lock:
                     self._frame_count = int(frame_idx)
-                if frame_idx % every_n != 0:
+
+                now_monotonic = time.monotonic()
+                if now_monotonic < next_detection_ts:
                     continue
+                next_detection_ts = now_monotonic + detection_interval_sec
                 try:
                     self._frame_queue.put((frame_idx, frame_ts, frame), timeout=0.01)
                 except queue.Full:
                     with self._state_lock:
                         self._dropped_frame_count += 1
+                        self._inference_dropped_count += 1
         finally:
             video_path = None
             try:
@@ -333,6 +426,9 @@ class SurveySessionManager:
                 self._current_video_path = video_path
 
     def _detect_loop(self) -> None:
+        client = self._detector_client
+        if client is None:
+            return
         ratio = max(0.0, min(1.0, float(self.config.survey.center_region_ratio)))
 
         while True:
@@ -342,10 +438,25 @@ class SurveySessionManager:
                 frame_idx, frame_ts, frame = self._frame_queue.get(timeout=0.2)
             except queue.Empty:
                 continue
+
+            with self._state_lock:
+                detector_online = bool(self._detector_online)
+            if not detector_online:
+                with self._state_lock:
+                    self._inference_dropped_count += 1
+                continue
+
             try:
-                detections = self.detector.detect_frame(frame)
+                detections = client.infer(frame=frame, frame_idx=int(frame_idx), frame_ts=str(frame_ts))
+            except RemoteYoloError as exc:
+                self._on_detector_disconnect(str(exc))
+                continue
             except Exception as exc:
-                self.logger.warning("Frame detection failed: %s", exc)
+                with self._state_lock:
+                    self._detector_error_count += 1
+                    self._detector_last_error = str(exc)
+                    self._inference_dropped_count += 1
+                self.logger.warning("Remote detector inference failed: %s", exc)
                 continue
 
             frame_h, frame_w = frame.shape[:2]
@@ -425,6 +536,53 @@ class SurveySessionManager:
         with self._state_lock:
             self._gps_controller = None
 
+    def _build_detector_client(self) -> RemoteYoloClient:
+        return RemoteYoloClient(
+            host=self.config.detector_service.host,
+            port=int(self.config.detector_service.port),
+            request_timeout_sec=float(self.config.detector_service.request_timeout_sec),
+            connect_timeout_sec=float(self.config.detector_service.connect_timeout_sec),
+            jpeg_quality=int(self.config.detector_service.jpeg_quality),
+            logger=self.logger,
+        )
+
+    def _close_detector_client(self, session_id: str) -> None:
+        with self._state_lock:
+            client = self._detector_client
+            self._detector_client = None
+            self._detector_online = False
+        if client is None:
+            return
+        try:
+            client.session_end(session_id=session_id)
+        except Exception as exc:
+            self.logger.warning("Detector SESSION_END failed: %s", exc)
+        finally:
+            client.close()
+
+    def _on_detector_disconnect(self, reason: str) -> None:
+        reason = str(reason)
+        with self._state_lock:
+            was_online = bool(self._detector_online)
+            self._detector_online = False
+            self._detector_error_count += 1
+            self._detector_last_error = reason
+            self._inference_dropped_count += 1
+            self._partial_detection = True
+            if was_online:
+                self._detector_disconnect_count += 1
+
+        if was_online:
+            self.logger.warning("Detector service disconnected during survey: %s", reason)
+            self._log("Detector service disconnected. Finalization will use partial detections.")
+
+    def _clear_frame_queue_locked(self) -> None:
+        while not self._frame_queue.empty():
+            try:
+                self._frame_queue.get_nowait()
+            except queue.Empty:
+                break
+
     def _append_raw_detection(self, frame_idx: int, frame_ts: str, detection: Dict[str, Any]) -> None:
         with self._state_lock:
             gps = dict(self._latest_gps) if self._latest_gps else None
@@ -479,6 +637,24 @@ class SurveySessionManager:
             dropped_frame_count = (
                 int(self._dropped_frame_count) if is_current_session else int(metadata.get("dropped_frame_count", 0))
             )
+            inference_dropped_count = (
+                int(self._inference_dropped_count) if is_current_session else int(metadata.get("inference_dropped_count", 0))
+            )
+            detector_error_count = (
+                int(self._detector_error_count) if is_current_session else int(metadata.get("detector_error_count", 0))
+            )
+            detector_disconnect_count = (
+                int(self._detector_disconnect_count)
+                if is_current_session
+                else int(metadata.get("detector_disconnect_count", 0))
+            )
+            detector_last_error = (
+                str(self._detector_last_error) if is_current_session else str(metadata.get("detector_last_error", ""))
+            )
+            detector_online = bool(self._detector_online) if is_current_session else bool(metadata.get("detector_online", False))
+            partial_detection = (
+                bool(self._partial_detection) if is_current_session else bool(metadata.get("partial_detection_finalized", False))
+            )
             recording_session = str(self._current_recording_session_dir or "") if is_current_session else str(
                 metadata.get("recording_session", "")
             )
@@ -498,12 +674,25 @@ class SurveySessionManager:
                 ),
                 "frame_count": frame_count,
                 "dropped_frame_count": dropped_frame_count,
+                "inference_dropped_count": inference_dropped_count,
                 "gps_skipped_count": gps_skipped_count,
                 "center_skipped_count": center_skipped_count,
                 "center_region_ratio": float(self.config.survey.center_region_ratio),
+                "detection_interval_sec": float(self.config.survey.detection_interval_sec),
                 "raw_detection_count": len(raw),
                 "unique_target_count": len(unique_targets),
                 "start_position": start_position,
+                "detector_mode": "remote_tcp",
+                "detector_enabled": bool(self.config.detector_service.enabled),
+                "detector_endpoint": "{0}:{1}".format(
+                    self.config.detector_service.host,
+                    int(self.config.detector_service.port),
+                ),
+                "detector_online": detector_online,
+                "detector_error_count": detector_error_count,
+                "detector_disconnect_count": detector_disconnect_count,
+                "detector_last_error": detector_last_error,
+                "partial_detection_finalized": partial_detection,
                 "graphs": {
                     "raw_points": str(raw_graph_path),
                     "tsp_cycle": str(tsp_graph_path),
@@ -529,6 +718,13 @@ class SurveySessionManager:
             "raw_count": len(raw),
             "unique_count": len(unique_targets),
             "gps_skipped_count": gps_skipped_count,
+            "center_skipped_count": center_skipped_count,
+            "inference_dropped_count": inference_dropped_count,
+            "detector_online": detector_online,
+            "detector_error_count": detector_error_count,
+            "detector_disconnect_count": detector_disconnect_count,
+            "detector_last_error": detector_last_error,
+            "partial_detection_finalized": partial_detection,
             "route_path": str(session_dir / "route_tsp_cycle.json"),
             "raw_graph": str(raw_graph_path),
             "tsp_graph": str(tsp_graph_path),
@@ -659,7 +855,7 @@ class SurveySessionManager:
 
             frame_idx = 1
             first_detections = detections_by_frame.get(frame_idx, [])
-            first_annotated = self.detector.annotate_frame(first_frame, first_detections) if first_detections else first_frame
+            first_annotated = self._annotate_frame(first_frame, first_detections) if first_detections else first_frame
             writer.write(first_annotated if first_annotated is not None else first_frame)
 
             while True:
@@ -668,7 +864,7 @@ class SurveySessionManager:
                     break
                 frame_idx += 1
                 detections = detections_by_frame.get(frame_idx, [])
-                annotated = self.detector.annotate_frame(frame, detections) if detections else frame
+                annotated = self._annotate_frame(frame, detections) if detections else frame
                 writer.write(annotated if annotated is not None else frame)
         finally:
             cap.release()
@@ -923,6 +1119,26 @@ class SurveySessionManager:
             cv2.putText(image, str(order), (px[0] + 5, px[1] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2)
 
         cv2.imwrite(str(graph_path), image)
+
+    def _annotate_frame(self, frame, detections: List[Dict[str, Any]]):
+        if frame is None:
+            return None
+        image = frame.copy()
+        for detection in detections:
+            try:
+                x1, y1, x2, y2 = [int(float(v)) for v in detection.get("bbox_xyxy", [0.0, 0.0, 0.0, 0.0])]
+                cls_name = str(detection.get("class_name", "target"))
+                conf = float(detection.get("confidence", 0.0))
+                px = int(float(detection.get("pixel_x", 0.0)))
+                py = int(float(detection.get("pixel_y", 0.0)))
+            except (TypeError, ValueError):
+                continue
+
+            label = "{0}:{1:.2f}".format(cls_name, conf)
+            cv2.rectangle(image, (x1, y1), (x2, y2), (60, 220, 20), 2)
+            cv2.circle(image, (px, py), 4, (10, 10, 240), -1)
+            cv2.putText(image, label, (x1, max(y1 - 10, 18)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+        return image
 
     def _load_metadata(self, session_dir: Path) -> Dict[str, Any]:
         path = session_dir / "metadata.json"

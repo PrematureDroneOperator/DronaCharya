@@ -73,6 +73,7 @@ class GCSApp:
             rec_frame,
             text=(
                 "Sends START_SURVEY / STOP_SURVEY over telemetry.\n"
+                "Requires detector service on Jetson (vision/detector_service.py) before START_SURVEY.\n"
                 "Raw detections, unique targets, and TSP graphs are stored in data/target_sessions/session-XXXX/.\n"
                 "Camera source is configured on the Jetson in config/config.yaml -> camera.stream_url."
             ),

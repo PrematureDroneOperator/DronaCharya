@@ -57,11 +57,20 @@ vision:
 survey:
   sessions_dir: "data/target_sessions"
   inference_every_n: 1
+  detection_interval_sec: 0.5
   dedup_radius_m: 3.0
   graph_canvas_px: 1200
   graph_margin_px: 60
   min_gps_fix_type: 3
   center_region_ratio: 0.4   # fraction of frame (0‑1) around center that counts for geotagging
+
+detector_service:
+  host: "127.0.0.1"
+  port: 17660
+  request_timeout_sec: 1.5
+  connect_timeout_sec: 2.0
+  jpeg_quality: 80
+  enabled: true
 
 mission:
   default_altitude_m: 15.0

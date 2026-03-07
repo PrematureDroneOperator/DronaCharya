@@ -35,6 +35,7 @@ class VisionConfig:
 class SurveyConfig:
     sessions_dir: str = "data/target_sessions"
     inference_every_n: int = 1
+    detection_interval_sec: float = 0.5
     dedup_radius_m: float = 3.0
     graph_canvas_px: int = 1200
     graph_margin_px: int = 60
@@ -68,6 +69,16 @@ class LoggingConfig:
 
 
 @dataclass
+class DetectorServiceConfig:
+    host: str = "127.0.0.1"
+    port: int = 17660
+    request_timeout_sec: float = 1.5
+    connect_timeout_sec: float = 2.0
+    jpeg_quality: int = 80
+    enabled: bool = True
+
+
+@dataclass
 class AppPaths:
     base_dir: Path
     data_dir: Path
@@ -88,6 +99,7 @@ class AppConfig:
     mission: MissionConfig
     telemetry: TelemetryConfig
     logging: LoggingConfig
+    detector_service: DetectorServiceConfig
 
 
 def _merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -109,6 +121,7 @@ def _default_dict() -> Dict[str, Any]:
         "mission": MissionConfig().__dict__,
         "telemetry": TelemetryConfig().__dict__,
         "logging": LoggingConfig().__dict__,
+        "detector_service": DetectorServiceConfig().__dict__,
     }
 
 
@@ -160,4 +173,5 @@ def load_config(config_path: Path, base_dir: Optional[Path] = None) -> AppConfig
         mission=MissionConfig(**merged["mission"]),
         telemetry=TelemetryConfig(**merged["telemetry"]),
         logging=LoggingConfig(**merged["logging"]),
+        detector_service=DetectorServiceConfig(**merged["detector_service"]),
     )
