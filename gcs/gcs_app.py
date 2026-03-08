@@ -203,8 +203,14 @@ class GCSApp:
             parsed = json.loads(payload)
         except json.JSONDecodeError:
             return payload
+            
         packet_type = parsed.get("type", "UNKNOWN")
         packet_payload = parsed.get("payload", {})
+        
+        if packet_type == "LOG":
+            msg = packet_payload.get("message", "")
+            return f"LOG: {msg}"
+            
         return "{0}: {1}".format(packet_type, packet_payload)
 
     def _append_log(self, message: str) -> None:
