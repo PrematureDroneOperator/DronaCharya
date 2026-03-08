@@ -193,6 +193,8 @@ class DroneAcharyaController:
             return self._stop_recording_local()
         if command == "START_MISSION":
             return self._start_mission()
+        if command == "BUILD_MISSION":
+            return self._build_mission()
         if command == "ABORT":
             return self._abort_mission()
         if command == "START_GPS_TEST":
@@ -205,6 +207,46 @@ class DroneAcharyaController:
             self._send_status()
             return {"ok": True, "message": "Status sent", "status": status}
         return {"ok": False, "message": "Unsupported command: {0}".format(command)}
+
+    def _build_mission(self) -> Dict[str, Any]:
+        try:
+            restored = self.survey_manager.load_latest_route()
+            waypoints = restored.get("waypoints", [])
+            if not waypoints:
+                return {"ok": False, "message": "No waypoints in latest route."}
+                
+            flight_speed = float(self.config.mission.flight_speed_m_s)
+            altitude = float(self.config.mission.default_altitude_m)
+            
+            lines = [
+                "==================================",
+                f"  MISSION BUILD PREVIEW ({len(waypoints)} targets)",
+                "==================================",
+                f"0: TAKEOFF to {altitude}m (Relative)",
+                f"1: CHANGE_SPEED to {flight_speed} m/s"
+            ]
+            
+            seq = 2
+            for i, wp in enumerate(waypoints):
+                lat = float(wp.get("latitude", 0.0))
+                lon = float(wp.get("longitude", 0.0))
+                hover = float(wp.get("hover_time", 5))
+                lines.append(f"{seq}: WAYPOINT -> Lat: {lat:.6f}, Lon: {lon:.6f} | Alt: {altitude}m")
+                seq += 1
+                lines.append(f"{seq}: HOVER -> wait {hover} sec")
+                seq += 1
+                
+            lines.append(f"{seq}: RETURN TO LAUNCH (RTL) & LAND")
+            lines.append("==================================")
+            
+            mission_transcript = "\n".join(lines)
+            self.telemetry_server.send_log(f"\n{mission_transcript}")
+            
+            return {"ok": True, "message": "Mission built and sent to logs."}
+        except Exception as exc:
+            self.logger.error("Failed to build mission: %s", exc)
+            return {"ok": False, "message": f"Failed to build mission preview: {exc}"}
+
 
     def _start_survey(self) -> Dict[str, Any]:
         if self._rec_thread and self._rec_thread.is_alive():

@@ -87,20 +87,23 @@ class MavlinkController:
         self.master.set_mode(mapping[mode])
         self.logger.info("Set flight mode to %s", mode)
 
-    def upload_mission(self, waypoints: List[Dict[str, float]]) -> None:
+    def upload_mission(self, waypoints: List[Dict[str, float]], flight_speed_m_s: Optional[float] = None) -> None:
         self._require_connection()
         if not waypoints:
             raise ValueError("No waypoints provided.")
 
-        self.logger.info("Uploading mission with %s waypoints.", len(waypoints))
+        has_speed = flight_speed_m_s is not None and flight_speed_m_s > 0
+        total_items = len(waypoints) + (1 if has_speed else 0)
+
+        self.logger.info("Uploading mission with %s items (including speed command: %s).", total_items, has_speed)
         self.master.waypoint_clear_all_send()
         time.sleep(0.5)
-        self.master.waypoint_count_send(len(waypoints))
+        self.master.waypoint_count_send(total_items)
 
         served = set()  # type: Set[int]
-        upload_deadline = time.time() + max(30, len(waypoints) * 8)
+        upload_deadline = time.time() + max(30, total_items * 8)
 
-        while len(served) < len(waypoints) and time.time() < upload_deadline:
+        while len(served) < total_items and time.time() < upload_deadline:
             request = self.master.recv_match(
                 type=["MISSION_REQUEST_INT", "MISSION_REQUEST"],
                 blocking=True,
@@ -109,29 +112,48 @@ class MavlinkController:
             if request is None:
                 continue
             seq = int(request.seq)
-            if seq in served or seq >= len(waypoints):
+            if seq in served or seq >= total_items:
                 continue
 
-            waypoint = waypoints[seq]
-            self.master.mav.mission_item_int_send(
-                self.master.target_system,
-                self.master.target_component,
-                seq,
-                mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
-                mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
-                0,
-                1 if seq == len(waypoints) - 1 else 0,
-                float(waypoint.get("hover_time", 5)),
-                0,
-                0,
-                0,
-                int(float(waypoint["latitude"]) * 1e7),
-                int(float(waypoint["longitude"]) * 1e7),
-                float(waypoint["altitude_m"]),
-            )
+            if has_speed and seq == 0:
+                self.master.mav.mission_item_int_send(
+                    self.master.target_system,
+                    self.master.target_component,
+                    seq,
+                    mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                    mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED,
+                    0,
+                    0,
+                    1, # Speed type: 1 = Ground Speed
+                    flight_speed_m_s,
+                    -1, # Throttle (no change)
+                    0,  # Absolute/Relative (0 = Absolute)
+                    0,
+                    0,
+                    0,
+                )
+            else:
+                wp_idx = seq - 1 if has_speed else seq
+                waypoint = waypoints[wp_idx]
+                self.master.mav.mission_item_int_send(
+                    self.master.target_system,
+                    self.master.target_component,
+                    seq,
+                    mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                    mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
+                    0,
+                    1 if wp_idx == len(waypoints) - 1 else 0,
+                    float(waypoint.get("hover_time", 5)),
+                    0,
+                    0,
+                    0,
+                    int(float(waypoint["latitude"]) * 1e7),
+                    int(float(waypoint["longitude"]) * 1e7),
+                    float(waypoint["altitude_m"]),
+                )
             served.add(seq)
 
-        if len(served) != len(waypoints):
+        if len(served) != total_items:
             raise RuntimeError("Mission upload incomplete due to MAVLink timeout.")
 
         ack = self.master.recv_match(type="MISSION_ACK", blocking=True, timeout=10.0)

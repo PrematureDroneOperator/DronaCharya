@@ -77,6 +77,7 @@ detector_service:
 mission:
   default_altitude_m: 15.0
   hover_time_sec: 5
+  flight_speed_m_s: 3.0
   
   # ──────────────────────────────────────────────────────────────────────────
   # MAVLINK CONNECTION
