@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
 import cv2
+import numpy as np
 
 from vision.frame_extractor import FrameExtractor
 
@@ -77,6 +78,7 @@ class DroneRecorder:
         self._recording = False
         self._frame_index = 0
         self._pending_frame = None
+        self._active_capture_name = ""
 
     @property
     def _is_gst_pipeline(self) -> bool:
@@ -88,10 +90,6 @@ class DroneRecorder:
 
     def _capture_candidates_for_numeric(self, dev: int, include_csi: bool) -> List[Tuple[str, object]]:
         candidates = []  # type: List[Tuple[str, object]]
-        candidates.append(("index-default[{0}]".format(dev), lambda: cv2.VideoCapture(dev)))
-        if hasattr(cv2, "CAP_V4L2"):
-            candidates.append(("index-v4l2[{0}]".format(dev), lambda: cv2.VideoCapture(dev, cv2.CAP_V4L2)))
-
         usb_gst_mjpeg = (
             "v4l2src device=/dev/video{0} ! "
             "image/jpeg,framerate=30/1 ! jpegdec ! "
@@ -113,7 +111,54 @@ class DroneRecorder:
                 "videoconvert ! video/x-raw, format=BGR ! appsink drop=true max-buffers=1"
             ).format(dev)
             candidates.append(("gst-csi-nvargus[{0}]".format(dev), lambda: cv2.VideoCapture(csi_gst, cv2.CAP_GSTREAMER)))
+        if hasattr(cv2, "CAP_V4L2"):
+            candidates.append(("index-v4l2[{0}]".format(dev), lambda: cv2.VideoCapture(dev, cv2.CAP_V4L2)))
+        candidates.append(("index-default[{0}]".format(dev), lambda: cv2.VideoCapture(dev)))
         return candidates
+
+    def _is_green_screen_frame(self, frame) -> bool:
+        if frame is None or not hasattr(frame, "shape"):
+            return True
+        if len(frame.shape) != 3 or int(frame.shape[2]) != 3:
+            return True
+        if int(frame.shape[0]) <= 0 or int(frame.shape[1]) <= 0:
+            return True
+
+        sample = frame[::8, ::8]
+        if sample.size == 0:
+            return True
+
+        sample_f = sample.astype(np.float32, copy=False)
+        blue = sample_f[:, :, 0]
+        green = sample_f[:, :, 1]
+        red = sample_f[:, :, 2]
+
+        mean_b = float(blue.mean())
+        mean_g = float(green.mean())
+        mean_r = float(red.mean())
+        if mean_g < 80.0:
+            return False
+
+        green_dominant = (green > red + 35.0) & (green > blue + 35.0)
+        green_ratio = float(green_dominant.mean())
+        green_vs_other_ratio = mean_g / max(1.0, max(mean_r, mean_b))
+        return green_ratio >= 0.85 and green_vs_other_ratio >= 1.6
+
+    def _read_valid_frame(self, cap, label: str, attempts: int = 5):
+        for attempt in range(1, max(1, int(attempts)) + 1):
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            if self._is_green_screen_frame(frame):
+                logger.warning(
+                    "Rejected probable green/corrupt frame from %s (attempt %d/%d).",
+                    label,
+                    attempt,
+                    attempts,
+                )
+                continue
+            return True, frame
+        return False, None
 
     def _capture_candidates_for_source(self, source) -> List[Tuple[str, object]]:
         if self._is_numeric_source(source):
@@ -157,12 +202,13 @@ class DroneRecorder:
                     # Helps many USB cams avoid green frames on Jetson.
                     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
 
-                ok, test_frame = cap.read()
+                ok, test_frame = self._read_valid_frame(cap, label=name, attempts=6)
                 if not ok or test_frame is None:
                     cap.release()
                     continue
 
                 logger.info("Camera opened using backend candidate: %s", name)
+                self._active_capture_name = name
                 return cap, test_frame
             except Exception:
                 if cap is not None:
@@ -231,7 +277,11 @@ class DroneRecorder:
             self._pending_frame = None
             ok = True
         else:
-            ok, frame = self._cap.read()
+            ok, frame = self._read_valid_frame(
+                self._cap,
+                label=self._active_capture_name or "active-capture",
+                attempts=4,
+            )
 
         if not ok:
             if include_frame:
@@ -254,6 +304,7 @@ class DroneRecorder:
             self._cap.release()
             self._cap = None
         self._pending_frame = None
+        self._active_capture_name = ""
 
         if self._video_path:
             logger.info("Recording stopped. Video saved to %s", self._video_path)
