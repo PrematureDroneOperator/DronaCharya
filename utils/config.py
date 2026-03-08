@@ -49,6 +49,7 @@ class SurveyConfig:
 class MissionConfig:
     default_altitude_m: float = 15.0
     hover_time_sec: int = 5
+    flight_speed_m_s: float = 3.0
     mavlink_connection: str = "udp:127.0.0.1:14550"
     mavlink_baudrate: int = 57600
     home_latitude: Optional[float] = None
