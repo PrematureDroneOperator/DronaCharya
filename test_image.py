@@ -8,7 +8,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("test_image")
 
 # 1. Load config and model
-config = load_config(config_path="config/config.yaml", base_dir=Path("."))
+config = load_config(config_path=Path("config/config.yaml"), base_dir=Path("."))
 config.vision.target_class_name = "" # Disable filter
 detector = FrameYoloDetector(config, logger)
 detector._load_model()
