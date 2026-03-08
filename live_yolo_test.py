@@ -24,7 +24,13 @@ from utils.config import load_config
 from vision.recorder import DroneRecorder
 from vision.frame_yolo_detector import FrameYoloDetector
 
+import argparse
+
 def main():
+    parser = argparse.ArgumentParser(description="Live camera YOLO debugger for Jetson")
+    parser.add_argument("--no-preview", action="store_true", help="Disable cv2.imshow (useful for headless SSH)")
+    args = parser.parse_args()
+
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     logger = logging.getLogger("live_yolo")
 
@@ -34,7 +40,7 @@ def main():
     logger.info("Initializing YOLO Detector (loading model... this may take a few seconds)")
     
     # We deliberately clear the target class name in this script so that ALL detections
-    # are shown on screen. This helps debug if the model uses a different class name (like 'target').
+    # are shown on screen. This helps debug if the model uses a different class name.
     original_target_class = config.vision.target_class_name
     config.vision.target_class_name = ""
     
@@ -45,7 +51,6 @@ def main():
     source = config.camera.stream_url.strip() or config.camera.device_id
     logger.info(f"Opening camera source: {source}")
 
-    # We use DroneRecorder to easily inherit all the Jetson camera fallback/opening logic
     recorder = DroneRecorder(source=source, fps=30, output_dir=PROJECT_ROOT / "logs", auto_extract=False)
     
     try:
@@ -56,40 +61,45 @@ def main():
 
     logger.info("=========================================================")
     logger.info(" LIVE YOLO TEST RUNNING ")
-    logger.info(" Press 'q' to quit the window.")
     logger.info(" Target class expected by config: '%s'", original_target_class)
     logger.info(" Minimum Confidence expected: %.2f", config.vision.conf_threshold)
+    if not args.no_preview:
+        logger.info(" Press 'q' to quit the window.")
+    else:
+        logger.info(" Preview disabled (--no-preview). Press Ctrl+C to quit.")
     logger.info("=========================================================")
+
+    preview_failed = False
 
     try:
         while True:
-            # We use include_frame=True to grab the image bytes
             ok, frame, frame_idx, frame_ts = recorder.record_frame(include_frame=True)
             if not ok or frame is None:
                 logger.warning("Failed to grab frame.")
                 time.sleep(1.0)
                 continue
 
-            # Run detection
             detections = detector.detect_frame(frame)
             
             if detections:
                 logger.info(f"Frame {frame_idx} -> DETECTED {len(detections)} targets!")
                 for d in detections:
-                    logger.info(f"   - {d['class_name']}: {d['confidence']:.2f}")
+                    logger.info(f"   - {d['class_name']}: {d['confidence']:.2f} at ({d['pixel_x']}, {d['pixel_y']})")
 
             # Draw boxes directly onto the frame
             annotated_frame = detector.annotate_frame(frame, detections)
             
-            if annotated_frame is not None:
-                cv2.imshow("Live YOLO Debugger", annotated_frame)
-            else:
-                cv2.imshow("Live YOLO Debugger", frame)
-
-            # Break loop on 'q'
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                logger.info("Quit requested by user.")
-                break
+            if not args.no_preview and not preview_failed:
+                try:
+                    display_frame = annotated_frame if annotated_frame is not None else frame
+                    cv2.imshow("Live YOLO Debugger", display_frame)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        logger.info("Quit requested by user.")
+                        break
+                except Exception as e:
+                    logger.warning(f"Failed to show video window (Headless/X11 issue?): {e}")
+                    logger.warning("Falling back to text-only mode.")
+                    preview_failed = True
 
     except KeyboardInterrupt:
         logger.info("Interrupted by user.")
@@ -98,7 +108,11 @@ def main():
     finally:
         logger.info("Releasing camera and closing windows...")
         recorder.stop()
-        cv2.destroyAllWindows()
+        if not args.no_preview and not preview_failed:
+            try:
+                cv2.destroyAllWindows()
+            except Exception:
+                pass
 
 if __name__ == "__main__":
     main()
