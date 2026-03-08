@@ -18,6 +18,8 @@ class MissionExecutor:
     def execute(
         self,
         waypoints: List[Dict[str, float]],
+        flight_speed_m_s: Optional[float] = None,
+        takeoff_alt_m: float = 10.0,
         abort_checker: Optional[Callable[[], bool]] = None,
         telemetry_callback: Optional[Callable[[Dict], None]] = None,
     ) -> Dict[str, float]:
@@ -27,7 +29,11 @@ class MissionExecutor:
         self.controller.connect()
         self.controller.get_current_gps(timeout_sec=20)
 
-        self.controller.upload_mission(waypoints)
+        total_mission_items = self.controller.upload_mission(
+            waypoints, 
+            flight_speed_m_s=flight_speed_m_s, 
+            takeoff_alt_m=takeoff_alt_m
+        )
         self.controller.arm()
 
         # AUTO mode is expected for mission execution on most autopilots.
@@ -36,6 +42,7 @@ class MissionExecutor:
 
         reached = -1
         mission_start = time.time()
+        last_telemetry_time = 0.0
 
         while True:
             if abort_checker and abort_checker():
@@ -49,7 +56,7 @@ class MissionExecutor:
 
             msg = self.controller.recv_match(
                 ["MISSION_ITEM_REACHED", "GLOBAL_POSITION_INT", "STATUSTEXT"],
-                timeout=1.0,
+                timeout=0.1,
             )
             if msg is None:
                 continue
@@ -58,16 +65,18 @@ class MissionExecutor:
             if msg_type == "MISSION_ITEM_REACHED":
                 reached = max(reached, int(msg.seq))
                 self.logger.info("Reached waypoint index %s", reached)
-                if reached >= len(waypoints) - 1:
+                if reached >= total_mission_items - 1:
                     break
             elif msg_type == "GLOBAL_POSITION_INT" and telemetry_callback:
-                telemetry_callback(
-                    {
-                        "latitude": float(msg.lat) / 1e7,
-                        "longitude": float(msg.lon) / 1e7,
-                        "altitude_m": float(msg.relative_alt) / 1000.0,
-                    }
-                )
+                if time.time() - last_telemetry_time >= 1.0:
+                    last_telemetry_time = time.time()
+                    telemetry_callback(
+                        {
+                            "latitude": float(msg.lat) / 1e7,
+                            "longitude": float(msg.lon) / 1e7,
+                            "altitude_m": float(msg.relative_alt) / 1000.0,
+                        }
+                    )
             elif msg_type == "STATUSTEXT":
                 self.logger.info("FCU: %s", getattr(msg, "text", ""))
 

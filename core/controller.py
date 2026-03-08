@@ -115,6 +115,11 @@ class DroneAcharyaController:
     def submit_command(
         self, command: str, source: str = "local", wait: bool = True, timeout: float = 3600.0
     ) -> Dict[str, Any]:
+        norm_cmd = self._normalize_command(command)
+        if norm_cmd == "ABORT":
+            self.logger.warning("Priority interrupt: %s from %s", norm_cmd, source)
+            return self._abort_mission()
+
         event = threading.Event() if wait else None
         request = CommandRequest(command=command, source=source, wait_event=event)
         self._command_queue.put(request)
@@ -456,6 +461,8 @@ class DroneAcharyaController:
         try:
             result = executor.execute(
                 self._ordered_waypoints,
+                flight_speed_m_s=float(self.config.mission.flight_speed_m_s),
+                takeoff_alt_m=float(self.config.mission.default_altitude_m),
                 abort_checker=lambda: self._abort_event.is_set(),
                 telemetry_callback=self._send_live_telemetry,
             )

@@ -87,15 +87,15 @@ class MavlinkController:
         self.master.set_mode(mapping[mode])
         self.logger.info("Set flight mode to %s", mode)
 
-    def upload_mission(self, waypoints: List[Dict[str, float]], flight_speed_m_s: Optional[float] = None) -> None:
+    def upload_mission(self, waypoints: List[Dict[str, float]], flight_speed_m_s: Optional[float] = None, takeoff_alt_m: float = 10.0) -> int:
         self._require_connection()
         if not waypoints:
             raise ValueError("No waypoints provided.")
 
         has_speed = flight_speed_m_s is not None and flight_speed_m_s > 0
-        total_items = len(waypoints) + (1 if has_speed else 0)
+        total_items = len(waypoints) + 2 + (1 if has_speed else 0)
 
-        self.logger.info("Uploading mission with %s items (including speed command: %s).", total_items, has_speed)
+        self.logger.info("Uploading mission with %s items (including takeoff, RTL, speed command: %s).", total_items, has_speed)
         self.master.waypoint_clear_all_send()
         time.sleep(0.5)
         self.master.waypoint_count_send(total_items)
@@ -115,25 +115,54 @@ class MavlinkController:
             if seq in served or seq >= total_items:
                 continue
 
-            if has_speed and seq == 0:
+            current_idx = 0
+            if seq == current_idx:
                 self.master.mav.mission_item_int_send(
                     self.master.target_system,
                     self.master.target_component,
                     seq,
                     mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
-                    mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED,
-                    0,
-                    0,
-                    1, # Speed type: 1 = Ground Speed
-                    flight_speed_m_s,
-                    -1, # Throttle (no change)
-                    0,  # Absolute/Relative (0 = Absolute)
+                    mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
                     0,
                     0,
                     0,
+                    0,
+                    0,
+                    0,
+                    int(float(waypoints[0].get("latitude", 0)) * 1e7),
+                    int(float(waypoints[0].get("longitude", 0)) * 1e7),
+                    takeoff_alt_m,
                 )
-            else:
-                wp_idx = seq - 1 if has_speed else seq
+                served.add(seq)
+                continue
+            
+            current_idx += 1
+            if has_speed:
+                if seq == current_idx:
+                    self.master.mav.mission_item_int_send(
+                        self.master.target_system,
+                        self.master.target_component,
+                        seq,
+                        mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                        mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED,
+                        0,
+                        0,
+                        1, # Speed type: 1 = Ground Speed
+                        flight_speed_m_s,
+                        -1, # Throttle (no change)
+                        0,  # Absolute/Relative (0 = Absolute)
+                        0,
+                        0,
+                        0,
+                    )
+                    served.add(seq)
+                    continue
+                current_idx += 1
+                
+            wp_start_idx = current_idx
+            wp_end_idx = current_idx + len(waypoints) - 1
+            if wp_start_idx <= seq <= wp_end_idx:
+                wp_idx = seq - wp_start_idx
                 waypoint = waypoints[wp_idx]
                 self.master.mav.mission_item_int_send(
                     self.master.target_system,
@@ -142,7 +171,7 @@ class MavlinkController:
                     mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
                     mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
                     0,
-                    1 if wp_idx == len(waypoints) - 1 else 0,
+                    0, # Not RTL yet
                     float(waypoint.get("hover_time", 5)),
                     0,
                     0,
@@ -151,7 +180,23 @@ class MavlinkController:
                     int(float(waypoint["longitude"]) * 1e7),
                     float(waypoint["altitude_m"]),
                 )
-            served.add(seq)
+                served.add(seq)
+                continue
+                
+            current_idx = wp_end_idx + 1
+            if seq == current_idx:
+                self.master.mav.mission_item_int_send(
+                    self.master.target_system,
+                    self.master.target_component,
+                    seq,
+                    mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                    mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH,
+                    0,
+                    1, # Current/End flag
+                    0, 0, 0, 0, 0, 0, 0,
+                )
+                served.add(seq)
+                continue
 
         if len(served) != total_items:
             raise RuntimeError("Mission upload incomplete due to MAVLink timeout.")
@@ -161,6 +206,7 @@ class MavlinkController:
             ack_type = None if ack is None else int(ack.type)
             raise RuntimeError(f"Mission rejected by autopilot (ack={ack_type}).")
         self.logger.info("Mission upload successful.")
+        return total_items
 
     def start_mission(self) -> None:
         self._require_connection()
@@ -181,7 +227,7 @@ class MavlinkController:
 
     def abort_mission(self) -> None:
         self._require_connection()
-        for fallback_mode in ("LOITER", "BRAKE", "POSHOLD", "HOLD"):
+        for fallback_mode in ("LOITER", "ALTHOLD", "STABILIZE", "POSHOLD", "HOLD", "BRAKE"):
             try:
                 self.set_mode(fallback_mode)
                 self.logger.warning("Mission aborted. Switched to %s mode.", fallback_mode)
