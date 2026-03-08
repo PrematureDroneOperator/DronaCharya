@@ -118,17 +118,31 @@ class DetectorService:
         return {"ok": False, "error": "unsupported_op: {0}".format(op)}
 
     def _infer(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        frame_idx = int(request.get("frame_idx", 0))
+        self.logger.info("==================================================")
+        self.logger.info("Frame %d received. Running YOLO inference...", frame_idx)
+
         image_b64 = request.get("image_jpeg_b64", "")
         if not isinstance(image_b64, str) or not image_b64:
+            self.logger.error("Frame %d missing image_jpeg_b64", frame_idx)
             return {"ok": False, "error": "missing image_jpeg_b64"}
+            
         try:
             image_bytes = base64.b64decode(image_b64.encode("ascii"), validate=True)
             image_np = np.frombuffer(image_bytes, dtype=np.uint8)
             frame = cv2.imdecode(image_np, cv2.IMREAD_COLOR)
             if frame is None:
                 raise ValueError("imdecode returned None")
+                
             detections = self.detector.detect_frame(frame)
+            
+            self.logger.info("Frame %d result: %d targets detected.", frame_idx, len(detections))
+            for i, d in enumerate(detections):
+                self.logger.info("   Target %d -> Class '%s' | Confidence: %.2f | Center Pixel: (%.1f, %.1f)", 
+                                 i+1, d.get("class_name"), d.get("confidence"), d.get("pixel_x"), d.get("pixel_y"))
+                                 
         except Exception as exc:
+            self.logger.error("Frame %d inference failed: %s", frame_idx, exc)
             return {"ok": False, "error": "infer_failed: {0}".format(exc)}
 
         return {

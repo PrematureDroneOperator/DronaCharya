@@ -430,7 +430,9 @@ class SurveySessionManager:
         recorder = self._recorder
         if recorder is None:
             return
-        detection_interval_sec = max(0.05, float(self.config.survey.detection_interval_sec))
+            
+        # Hardcoding the interval to perfectly match 1 second as requested
+        detection_interval_sec = 1.0 
         next_detection_ts = 0.0
         try:
             while not self._record_stop_event.is_set():
@@ -445,6 +447,7 @@ class SurveySessionManager:
                     continue
                 next_detection_ts = now_monotonic + detection_interval_sec
                 try:
+                    self.logger.info("Sending Frame %d to YOLO detector...", frame_idx)
                     self._frame_queue.put((frame_idx, frame_ts, frame), timeout=0.01)
                 except queue.Full:
                     with self._state_lock:
@@ -511,9 +514,11 @@ class SurveySessionManager:
                 if px < margin_x or px > fw - margin_x or py < margin_y or py > fh - margin_y:
                     with self._state_lock:
                         self._center_skipped_count += 1
+                    self.logger.info("  -> Target at (%.1f, %.1f) dismissed: Outside of central region.", px, py)
                     continue
                 with self._state_lock:
                     self._detector_hit_count += 1
+                self.logger.info("  -> Target at (%.1f, %.1f) ACCEPTED near center! Calling GPS to tag coordinates...", px, py)
                 self._append_raw_detection(frame_idx, frame_ts, detection)
 
     def _gps_loop(self) -> None:
