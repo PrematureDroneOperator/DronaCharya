@@ -1,5 +1,5 @@
 import time
-from typing import Any, Dict, List, Set, Union
+from typing import Any, Dict, List, Set, Union, Optional
 
 from pymavlink import mavutil
 
