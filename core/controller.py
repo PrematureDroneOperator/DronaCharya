@@ -464,7 +464,10 @@ class DroneAcharyaController:
             
         script_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "test_gps_logs.py")
         try:
-            self._gps_test_process = subprocess.Popen([sys.executable, script_path])
+            self._gps_test_process = subprocess.Popen(
+                [sys.executable, script_path],
+                close_fds=True
+            )
             self.telemetry_server.send_log("Started continuous GPS logging test.", level="INFO")
             return {"ok": True, "message": "GPS test started"}
         except Exception as e:
