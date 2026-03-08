@@ -11,20 +11,29 @@ class MavlinkController:
         self.logger = logger
         self.master: Any = None
 
-    def connect(self, timeout_sec: int = 15) -> None:
+    def connect(self, timeout_sec: int = 15, abort_checker: Any = None) -> None:
         if self.master is not None:
             return
 
         self.logger.info("Connecting MAVLink on %s", self.connection_string)
         self.master = mavutil.mavlink_connection(self.connection_string, baud=self.baudrate)
-        heartbeat = self.master.wait_heartbeat(timeout=timeout_sec)
-        if heartbeat is None:
-            self.master.close()
-            self.master = None
-            raise RuntimeError("MAVLink heartbeat timeout.")
-        self.logger.info(
-            "MAVLink connected: system=%s component=%s", self.master.target_system, self.master.target_component
-        )
+        
+        start_time = time.time()
+        while time.time() - start_time < timeout_sec:
+            if abort_checker and abort_checker():
+                self.master.close()
+                self.master = None
+                raise RuntimeError("MAVLink connection aborted.")
+            heartbeat = self.master.wait_heartbeat(timeout=1.0)
+            if heartbeat is not None:
+                self.logger.info(
+                    "MAVLink connected: system=%s component=%s", self.master.target_system, self.master.target_component
+                )
+                return
+                
+        self.master.close()
+        self.master = None
+        raise RuntimeError("MAVLink heartbeat timeout.")
 
     def close(self) -> None:
         if self.master is not None:

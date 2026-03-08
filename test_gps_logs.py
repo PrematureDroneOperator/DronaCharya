@@ -79,7 +79,7 @@ class GPSTracker:
         
         try:
             self.logger.info(f"Attempting to connect to {self.config.mission.mavlink_connection}...")
-            self.mavlink.connect(timeout_sec=10)
+            self.mavlink.connect(timeout_sec=10, abort_checker=lambda: self.stop_event.is_set())
             self.logger.info("Connection established. Waiting for valid GPS fixes...")
             
             while not self.stop_event.is_set():

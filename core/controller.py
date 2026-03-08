@@ -481,6 +481,13 @@ class DroneAcharyaController:
             self._gps_test_process = None
             self.telemetry_server.send_log("Stopped continuous GPS logging test.", level="INFO")
             return {"ok": True, "message": "GPS test stopped"}
+        except subprocess.TimeoutExpired:
+            self.logger.warning("GPS test did not stop cleanly. Forcing kill.")
+            self._gps_test_process.kill()
+            self._gps_test_process.wait()
+            self._gps_test_process = None
+            self.telemetry_server.send_log("Force killed continuous GPS logging test.", level="WARNING")
+            return {"ok": True, "message": "GPS test force stopped"}
         except Exception as e:
             self.logger.error(f"Failed to stop GPS test: {e}")
             return {"ok": False, "message": f"Failed to stop GPS test: {e}"}
