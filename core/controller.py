@@ -12,6 +12,7 @@ from utils.logger import RingBufferLogHandler
 from vision.recorder import DroneRecorder
 import subprocess
 import os
+import sys
 
 
 @dataclass
