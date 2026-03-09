@@ -93,7 +93,7 @@ class MavlinkController:
             raise ValueError("No waypoints provided.")
 
         has_speed = flight_speed_m_s is not None and flight_speed_m_s > 0
-        total_items = len(waypoints) + 2 + (1 if has_speed else 0)
+        total_items = len(waypoints) + 3 + (1 if has_speed else 0)  # +3 for Home (Seq 0), Takeoff, and RTL
 
         self.logger.info("Uploading mission with %s items (including takeoff, RTL, speed command: %s).", total_items, has_speed)
         self.master.waypoint_clear_all_send()
@@ -116,6 +116,29 @@ class MavlinkController:
                 continue
 
             current_idx = 0
+            if seq == current_idx:
+                # Sequence 0 is always HOME in ArduPilot. We send a dummy waypoint,
+                # APM will overwrite it with actual home upon arming.
+                self.master.mav.mission_item_int_send(
+                    self.master.target_system,
+                    self.master.target_component,
+                    seq,
+                    mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                    mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    int(float(waypoints[0].get("latitude", 0)) * 1e7),
+                    int(float(waypoints[0].get("longitude", 0)) * 1e7),
+                    0,
+                )
+                served.add(seq)
+                continue
+
+            current_idx += 1
             if seq == current_idx:
                 self.master.mav.mission_item_int_send(
                     self.master.target_system,
