@@ -1,0 +1,51 @@
+{
+  "timestamp_utc": "2026-03-14T04:36:50.458879+00:00",
+  "count": 3,
+  "raw_detections": [
+    {
+      "frame_idx": 1,
+      "timestamp_utc": "2026-03-13T10:55:13.114134+00:00",
+      "class_name": "target",
+      "confidence": "0.8022",
+      "latitude": "29.867304",
+      "longitude": "77.899384",
+      "gps_fix_type": 3,
+      "pixel_x": 640,
+      "pixel_y": 360,
+      "bbox_x1": 600,
+      "bbox_y1": 300,
+      "bbox_x2": 680,
+      "bbox_y2": 420
+    },
+    {
+      "frame_idx": 2,
+      "timestamp_utc": "2026-03-13T10:55:15.188521+00:00",
+      "class_name": "target",
+      "confidence": "0.7123",
+      "latitude": "29.8677465",
+      "longitude": "77.8993321",
+      "gps_fix_type": 3,
+      "pixel_x": 640,
+      "pixel_y": 360,
+      "bbox_x1": 600,
+      "bbox_y1": 300,
+      "bbox_x2": 680,
+      "bbox_y2": 420
+    },
+    {
+      "frame_idx": 3,
+      "timestamp_utc": "2026-03-13T10:57:43.220305+00:00",
+      "class_name": "target",
+      "confidence": "0.3724",
+      "latitude": "29.868066",
+      "longitude": "77.899070",
+      "gps_fix_type": 3,
+      "pixel_x": 640,
+      "pixel_y": 360,
+      "bbox_x1": 600,
+      "bbox_y1": 300,
+      "bbox_x2": 680,
+      "bbox_y2": 420
+    }
+  ]
+}
