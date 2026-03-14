@@ -197,6 +197,8 @@ class DroneAcharyaController:
             return self._stop_survey()
         if command == "BUILD_ROUTE":
             return self._build_route()
+        if command == "BUILD_ROUTE_RAW":
+            return self._build_route_raw()
         if command == "START_RECORDING":
             return self._start_recording_local()
         if command == "STOP_RECORDING":
@@ -370,6 +372,35 @@ class DroneAcharyaController:
         self._sync_detector_status()
         self._send_status()
         self.telemetry_server.send_log("Route ready: {0}".format(result.get("route_path", "")))
+        return result
+
+    def _build_route_raw(self) -> Dict[str, Any]:
+        self._set_state(mission_state="BUILDING_ROUTE", last_error="")
+        self.telemetry_server.send_log("Raw-order route build requested (no TSP).")
+
+        result = self.survey_manager.build_route_raw()
+        route = result.get("route", {})
+        self._ordered_waypoints = route.get("waypoints", [])
+        start_position = route.get("start_position", {})
+
+        self._set_state(
+            mission_state="ROUTE_READY",
+            survey_state="IDLE",
+            detected_targets_count=int(result.get("unique_count", 0)),
+            raw_detection_count=int(result.get("raw_count", 0)),
+            unique_target_count=int(result.get("unique_count", 0)),
+            last_target_session=result.get("session_dir", ""),
+            last_route_path=result.get("route_path", ""),
+            takeoff_latitude=float(start_position.get("latitude", 0.0)) if start_position else None,
+            takeoff_longitude=float(start_position.get("longitude", 0.0)) if start_position else None,
+        )
+        self._sync_detector_status()
+        self._send_status()
+        self.telemetry_server.send_log(
+            "Raw-order route ready ({0} targets): {1}".format(
+                result.get("unique_count", 0), result.get("route_path", "")
+            )
+        )
         return result
 
     def _start_recording_local(self) -> Dict[str, Any]:

@@ -346,6 +346,7 @@ class GCSApp:
             ("Start Survey", "START_SURVEY"),
             ("Stop Survey", "STOP_SURVEY"),
             ("Build Route", "BUILD_ROUTE"),
+            ("Build Route Raw", "BUILD_ROUTE_RAW"),
             ("Build Mission", "BUILD_MISSION"),
             ("Start Mission", "START_MISSION"),
             ("Abort", "ABORT"),

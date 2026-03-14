@@ -395,6 +395,22 @@ class SurveySessionManager:
             raise RuntimeError("No survey session available for route generation.")
         return self._finalize_session(target)
 
+    def build_route_raw(self, session_dir: Optional[Path] = None) -> Dict[str, Any]:
+        """Build a route without the TSP solver.
+
+        Targets are visited in the natural first-seen order produced by
+        clustering the raw detections (sorted by frame_idx / timestamp_utc).
+        Result is saved to route_raw_order.json alongside the normal TSP files.
+        """
+        with self._state_lock:
+            if self._running:
+                raise RuntimeError("Cannot build route while survey is running.")
+            default_session = self._current_session_dir
+        target = session_dir or default_session or self.get_latest_session(require_route=False)
+        if target is None:
+            raise RuntimeError("No survey session available for raw route generation.")
+        return self._finalize_session_raw(target)
+
     def load_latest_route(self) -> Dict[str, Any]:
         session_dir = self.get_latest_session(require_route=True)
         if session_dir is None:
@@ -1262,3 +1278,147 @@ class SurveySessionManager:
                 self._telemetry_log(message)
             except Exception:
                 pass
+
+    # ------------------------------------------------------------------
+    # Raw-order route (no TSP)
+    # ------------------------------------------------------------------
+
+    def _finalize_session_raw(self, session_dir: Path) -> Dict[str, Any]:
+        """Like _finalize_session but uses first-seen target ordering instead of TSP."""
+        raw = self._load_or_current_raw(session_dir)
+        raw = sorted(raw, key=lambda row: (int(row.get("frame_idx", 0)), str(row.get("timestamp_utc", ""))))
+        metadata = self._load_metadata(session_dir)
+
+        start_position = self._resolve_start_position(metadata, raw)
+        unique_targets = self._cluster_targets(raw, float(self.config.survey.dedup_radius_m))
+        route_payload = self._build_route_payload_raw(session_dir.name, start_position, unique_targets)
+
+        graphs_dir = session_dir / "graphs"
+        graphs_dir.mkdir(parents=True, exist_ok=True)
+        raw_order_graph_path = graphs_dir / "raw_order.png"
+
+        self._write_raw_files(session_dir, raw)
+        self._write_unique_files(session_dir, unique_targets)
+        self._write_route_file_raw(session_dir, route_payload)
+        self._write_raw_order_graph(raw_order_graph_path, route_payload)
+
+        return {
+            "ok": True,
+            "message": "Raw-order route built ({0} targets).".format(len(unique_targets)),
+            "session_dir": str(session_dir),
+            "raw_count": len(raw),
+            "unique_count": len(unique_targets),
+            "route_path": str(session_dir / "route_raw_order.json"),
+            "raw_order_graph": str(raw_order_graph_path),
+            "route": route_payload,
+            "waypoints": route_payload.get("waypoints", []),
+        }
+
+    def _build_route_payload_raw(
+        self,
+        session_id: str,
+        start_position: Dict[str, float],
+        unique_targets: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Build a route payload in first-seen order — no TSP solver involved."""
+        start_lat = float(start_position["latitude"])
+        start_lon = float(start_position["longitude"])
+
+        ordered_targets = []  # type: List[Dict[str, Any]]
+        total_distance_m = 0.0
+        prev_lat, prev_lon = start_lat, start_lon
+
+        for visit_order, target in enumerate(unique_targets, start=1):
+            t = dict(target)
+            lat = float(t["latitude"])
+            lon = float(t["longitude"])
+            rel_x, rel_y = self.transformer.gps_to_relative(start_lat, start_lon, lat, lon)
+            t["visit_order"] = visit_order
+            t["relative_x_m"] = round(rel_x, 3)
+            t["relative_y_m"] = round(rel_y, 3)
+            total_distance_m += _haversine_meters(prev_lat, prev_lon, lat, lon)
+            prev_lat, prev_lon = lat, lon
+            ordered_targets.append(t)
+
+        if ordered_targets:
+            total_distance_m += _haversine_meters(prev_lat, prev_lon, start_lat, start_lon)
+
+        waypoints = []  # type: List[Dict[str, Any]]
+        for index, target in enumerate(ordered_targets):
+            waypoints.append(
+                {
+                    "index": index,
+                    "visit_order": int(target["visit_order"]),
+                    "target_id": int(target["target_id"]),
+                    "latitude": float(target["latitude"]),
+                    "longitude": float(target["longitude"]),
+                    "altitude_m": float(self.config.mission.default_altitude_m),
+                    "hover_time": float(self.config.mission.hover_time_sec),
+                }
+            )
+
+        if ordered_targets:
+            waypoints.append(
+                {
+                    "index": len(waypoints),
+                    "visit_order": len(waypoints) + 1,
+                    "target_id": "RETURN_START",
+                    "latitude": round(start_lat, 8),
+                    "longitude": round(start_lon, 8),
+                    "altitude_m": float(self.config.mission.default_altitude_m),
+                    "hover_time": float(self.config.mission.hover_time_sec),
+                }
+            )
+
+        return {
+            "session_id": session_id,
+            "timestamp_utc": _utc_now_iso(),
+            "route_type": "raw_order",
+            "closed_cycle": True,
+            "total_targets": len(ordered_targets),
+            "total_distance_m": round(total_distance_m, 3),
+            "start_position": {
+                "latitude": round(start_lat, 8),
+                "longitude": round(start_lon, 8),
+            },
+            "ordered_targets": ordered_targets,
+            "waypoints": waypoints,
+        }
+
+    def _write_route_file_raw(self, session_dir: Path, route_payload: Dict[str, Any]) -> None:
+        """Save the raw-order route to route_raw_order.json."""
+        with (session_dir / "route_raw_order.json").open("w", encoding="utf-8") as handle:
+            json.dump(route_payload, handle, indent=2)
+
+    def _write_raw_order_graph(self, graph_path: Path, route_payload: Dict[str, Any]) -> None:
+        """Draw the raw-order path graph — blue path in first-seen order, no TSP optimisation."""
+        canvas_px = int(self.config.survey.graph_canvas_px)
+        image = np.full((canvas_px, canvas_px, 3), 255, dtype=np.uint8)
+        ordered_targets = route_payload.get("ordered_targets", [])
+        ordered_xy = [(float(t["relative_x_m"]), float(t["relative_y_m"])) for t in ordered_targets]
+        projector = _GraphProjector(ordered_xy + [(0.0, 0.0)], canvas_px, int(self.config.survey.graph_margin_px))
+
+        start_px = projector.project((0.0, 0.0))
+        cv2.circle(image, start_px, 7, (255, 0, 0), -1)
+        cv2.putText(image, "START", (start_px[0] + 8, start_px[1] - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (80, 80, 80), 1)
+        cv2.putText(image, "Raw-order route (no TSP)", (int(self.config.survey.graph_margin_px), 36),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (30, 30, 30), 2)
+
+        if not ordered_xy:
+            cv2.putText(image, "No unique targets", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (80, 80, 80), 2)
+            cv2.imwrite(str(graph_path), image)
+            return
+
+        cycle_points = [(0.0, 0.0)] + ordered_xy + [(0.0, 0.0)]
+        cycle_pixels = [projector.project(point) for point in cycle_points]
+        for idx in range(1, len(cycle_pixels)):
+            cv2.line(image, cycle_pixels[idx - 1], cycle_pixels[idx], (0, 130, 200), 2)
+
+        for order, point in enumerate(ordered_xy, start=1):
+            px = projector.project(point)
+            cv2.circle(image, px, 5, (0, 0, 200), -1)
+            cv2.putText(image, str(order), (px[0] + 5, px[1] - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2)
+
+        cv2.imwrite(str(graph_path), image)
