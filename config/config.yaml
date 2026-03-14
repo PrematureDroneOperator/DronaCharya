@@ -75,8 +75,8 @@ detector_service:
   enabled: true
 
 mission:
-  default_altitude_m: 15.0
-  hover_time_sec: 5
+  default_altitude_m: 8.0
+  hover_time_sec: 10
   flight_speed_m_s: 3.0
   
   # ──────────────────────────────────────────────────────────────────────────

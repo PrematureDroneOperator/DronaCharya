@@ -1,6 +1,7 @@
 import queue
 import threading
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from navigation.mavlink_controller import MavlinkController
@@ -222,42 +223,103 @@ class DroneAcharyaController:
 
     def _build_mission(self) -> Dict[str, Any]:
         try:
-            restored = self.survey_manager.load_latest_route()
+            restored = self._load_selected_route()
             waypoints = restored.get("waypoints", [])
             if not waypoints:
                 return {"ok": False, "message": "No waypoints in latest route."}
-                
+
+            route = restored.get("route", {})
             flight_speed = float(self.config.mission.flight_speed_m_s)
-            altitude = float(self.config.mission.default_altitude_m)
-            
+            altitude = self._mission_takeoff_altitude(waypoints)
+            target_count = int(route.get("total_targets", len(waypoints)))
+
             lines = [
                 "==================================",
-                f"  MISSION BUILD PREVIEW ({len(waypoints)} targets)",
+                f"  MISSION BUILD PREVIEW ({target_count} targets)",
                 "==================================",
                 f"0: TAKEOFF to {altitude}m (Relative)",
                 f"1: CHANGE_SPEED to {flight_speed} m/s"
             ]
-            
+
             seq = 2
-            for i, wp in enumerate(waypoints):
+            for wp in waypoints:
                 lat = float(wp.get("latitude", 0.0))
                 lon = float(wp.get("longitude", 0.0))
-                hover = float(wp.get("hover_time", 5))
-                lines.append(f"{seq}: WAYPOINT -> Lat: {lat:.6f}, Lon: {lon:.6f} | Alt: {altitude}m")
+                hover = float(wp.get("hover_time", self.config.mission.hover_time_sec))
+                waypoint_altitude = float(wp.get("altitude_m", altitude))
+                lines.append(f"{seq}: WAYPOINT -> Lat: {lat:.6f}, Lon: {lon:.6f} | Alt: {waypoint_altitude}m")
                 seq += 1
                 lines.append(f"{seq}: HOVER -> wait {hover} sec")
                 seq += 1
-                
+
             lines.append(f"{seq}: RETURN TO LAUNCH (RTL) & LAND")
             lines.append("==================================")
-            
+
             mission_transcript = "\n".join(lines)
             self.telemetry_server.send_log(f"\n{mission_transcript}")
-            
+
             return {"ok": True, "message": "Mission built and sent to logs."}
         except Exception as exc:
             self.logger.error("Failed to build mission: %s", exc)
             return {"ok": False, "message": f"Failed to build mission preview: {exc}"}
+
+    def _selected_route_path(self) -> Optional[Path]:
+        with self.state_lock:
+            raw_path = str(self.state.last_route_path or "").strip()
+        if not raw_path:
+            return None
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = self.config.paths.base_dir / candidate
+        return candidate if candidate.exists() else None
+
+    def _prepare_mission_waypoints(self, waypoints: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        altitude = float(self.config.mission.default_altitude_m)
+        hover_time = float(self.config.mission.hover_time_sec)
+
+        prepared = []  # type: List[Dict[str, Any]]
+        for index, waypoint in enumerate(waypoints):
+            item = dict(waypoint)
+            item["index"] = index
+            item["altitude_m"] = altitude
+            item["hover_time"] = hover_time
+            prepared.append(item)
+        return prepared
+
+    def _mission_takeoff_altitude(self, waypoints: List[Dict[str, Any]]) -> float:
+        if waypoints:
+            return float(waypoints[0].get("altitude_m", self.config.mission.default_altitude_m))
+        return float(self.config.mission.default_altitude_m)
+
+    def _load_selected_route(self) -> Dict[str, Any]:
+        route_path = self._selected_route_path()
+        if route_path is not None:
+            restored = self.survey_manager.load_route(route_path)
+        else:
+            restored = self.survey_manager.load_latest_route()
+
+        raw_waypoints = restored.get("waypoints", [])
+        if not raw_waypoints:
+            raise RuntimeError("Latest session route has no waypoints.")
+
+        prepared_waypoints = self._prepare_mission_waypoints(raw_waypoints)
+        route = dict(restored.get("route", {}))
+        route["waypoints"] = prepared_waypoints
+
+        start_position = route.get("start_position", {})
+        self._ordered_waypoints = prepared_waypoints
+        self._set_state(
+            last_target_session=restored.get("session_dir", ""),
+            last_route_path=restored.get("route_path", ""),
+            takeoff_latitude=float(start_position.get("latitude", 0.0)) if start_position else None,
+            takeoff_longitude=float(start_position.get("longitude", 0.0)) if start_position else None,
+        )
+
+        return {
+            **restored,
+            "route": route,
+            "waypoints": prepared_waypoints,
+        }
 
 
     def _start_survey(self) -> Dict[str, Any]:
@@ -464,20 +526,8 @@ class DroneAcharyaController:
         return {"ok": True, "message": "Stop signal sent. Extracting frames..."}
 
     def _start_mission(self) -> Dict[str, Any]:
-        if not self._ordered_waypoints:
-            restored = self.survey_manager.load_latest_route()
-            route = restored.get("route", {})
-            self._ordered_waypoints = restored.get("waypoints", [])
-            if not self._ordered_waypoints:
-                raise RuntimeError("Latest session route has no waypoints.")
-            start_position = route.get("start_position", {})
-            self._set_state(
-                last_target_session=restored.get("session_dir", ""),
-                last_route_path=restored.get("route_path", ""),
-                takeoff_latitude=float(start_position.get("latitude", 0.0)) if start_position else None,
-                takeoff_longitude=float(start_position.get("longitude", 0.0)) if start_position else None,
-            )
-            self.telemetry_server.send_log("Loaded route from latest completed session.")
+        restored = self._load_selected_route()
+        self.telemetry_server.send_log("Loaded mission route -> {0}".format(restored.get("route_path", "")))
 
         self._abort_event.clear()
         self._set_state(mission_state="MISSION_RUNNING", last_error="")
@@ -508,7 +558,7 @@ class DroneAcharyaController:
             result = executor.execute(
                 self._ordered_waypoints,
                 flight_speed_m_s=float(self.config.mission.flight_speed_m_s),
-                takeoff_alt_m=float(self.config.mission.default_altitude_m),
+                takeoff_alt_m=self._mission_takeoff_altitude(self._ordered_waypoints),
                 abort_checker=lambda: self._abort_event.is_set(),
                 telemetry_callback=self._on_mission_telemetry,
             )

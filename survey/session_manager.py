@@ -411,19 +411,33 @@ class SurveySessionManager:
             raise RuntimeError("No survey session available for raw route generation.")
         return self._finalize_session_raw(target)
 
+    def load_route(self, route_path: Path) -> Dict[str, Any]:
+        resolved_route_path = Path(route_path)
+        if not resolved_route_path.is_absolute():
+            resolved_route_path = self.config.paths.base_dir / resolved_route_path
+        resolved_route_path = resolved_route_path.resolve()
+        if not resolved_route_path.exists():
+            raise RuntimeError("Route file not found: {0}".format(resolved_route_path))
+
+        with resolved_route_path.open("r", encoding="utf-8") as handle:
+            route = json.load(handle)
+
+        session_dir = resolved_route_path.parent
+        return {
+            "session_dir": str(session_dir),
+            "route_path": str(resolved_route_path),
+            "route": route,
+            "waypoints": route.get("waypoints", []),
+        }
+
     def load_latest_route(self) -> Dict[str, Any]:
         session_dir = self.get_latest_session(require_route=True)
         if session_dir is None:
             raise RuntimeError("No completed target session route found.")
-        route_path = session_dir / "route_tsp_cycle.json"
-        with route_path.open("r", encoding="utf-8") as handle:
-            route = json.load(handle)
-        return {
-            "session_dir": str(session_dir),
-            "route_path": str(route_path),
-            "route": route,
-            "waypoints": route.get("waypoints", []),
-        }
+        route_path = self._resolve_route_path(session_dir)
+        if route_path is None:
+            raise RuntimeError("No completed target session route found.")
+        return self.load_route(route_path)
 
     def get_latest_session(self, require_route: bool) -> Optional[Path]:
         root = self.config.paths.target_sessions_dir
@@ -433,12 +447,25 @@ class SurveySessionManager:
         for entry in root.iterdir():
             if not entry.is_dir() or not re.fullmatch(r"session-\d{4}", entry.name):
                 continue
-            if require_route and not (entry / "route_tsp_cycle.json").exists():
+            if require_route and self._resolve_route_path(entry) is None:
                 continue
             candidates.append(entry)
         if not candidates:
             return None
         return sorted(candidates, key=lambda p: p.name)[-1]
+
+    def _resolve_route_path(self, session_dir: Path) -> Optional[Path]:
+        candidates = []  # type: List[Path]
+        for name in ("route_tsp_cycle.json", "route_raw_order.json"):
+            path = session_dir / name
+            if path.exists():
+                candidates.append(path)
+        if not candidates:
+            return None
+        return max(
+            candidates,
+            key=lambda path: (path.stat().st_mtime, 1 if path.name == "route_raw_order.json" else 0),
+        )
 
     def _record_loop(self) -> None:
         recorder = self._recorder
@@ -1340,9 +1367,6 @@ class SurveySessionManager:
             prev_lat, prev_lon = lat, lon
             ordered_targets.append(t)
 
-        if ordered_targets:
-            total_distance_m += _haversine_meters(prev_lat, prev_lon, start_lat, start_lon)
-
         waypoints = []  # type: List[Dict[str, Any]]
         for index, target in enumerate(ordered_targets):
             waypoints.append(
@@ -1357,24 +1381,11 @@ class SurveySessionManager:
                 }
             )
 
-        if ordered_targets:
-            waypoints.append(
-                {
-                    "index": len(waypoints),
-                    "visit_order": len(waypoints) + 1,
-                    "target_id": "RETURN_START",
-                    "latitude": round(start_lat, 8),
-                    "longitude": round(start_lon, 8),
-                    "altitude_m": float(self.config.mission.default_altitude_m),
-                    "hover_time": float(self.config.mission.hover_time_sec),
-                }
-            )
-
         return {
             "session_id": session_id,
             "timestamp_utc": _utc_now_iso(),
             "route_type": "raw_order",
-            "closed_cycle": True,
+            "closed_cycle": False,
             "total_targets": len(ordered_targets),
             "total_distance_m": round(total_distance_m, 3),
             "start_position": {
