@@ -90,6 +90,7 @@ class AppPaths:
     routes_dir: Path
     logs_dir: Path
     target_sessions_dir: Path
+    mission_sessions_dir: Path
 
 
 @dataclass
@@ -137,8 +138,9 @@ def ensure_data_dirs(base_dir: Path, target_sessions_dir_setting: str = "data/ta
     target_sessions_dir = Path(target_sessions_dir_setting)
     if not target_sessions_dir.is_absolute():
         target_sessions_dir = base_dir / target_sessions_dir
+    mission_sessions_dir = data_dir / "mission_sessions"
 
-    for directory in (data_dir, maps_dir, detections_dir, routes_dir, logs_dir, target_sessions_dir):
+    for directory in (data_dir, maps_dir, detections_dir, routes_dir, logs_dir, target_sessions_dir, mission_sessions_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
     return AppPaths(
@@ -149,6 +151,7 @@ def ensure_data_dirs(base_dir: Path, target_sessions_dir_setting: str = "data/ta
         routes_dir=routes_dir,
         logs_dir=logs_dir,
         target_sessions_dir=target_sessions_dir,
+        mission_sessions_dir=mission_sessions_dir,
     )
 
 

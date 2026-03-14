@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from navigation.mavlink_controller import MavlinkController
 from navigation.mission_executor import MissionExecutor
+from navigation.mission_session import MissionSessionRecorder
 from survey.session_manager import SurveySessionManager
 from telemetry.telemetry_server import TelemetryServer
 from utils.config import AppConfig
@@ -44,6 +45,7 @@ class AppState:
     detector_last_error: str = ""
     takeoff_latitude: Optional[float] = None
     takeoff_longitude: Optional[float] = None
+    last_mission_session: str = ""
 
 
 @dataclass
@@ -77,6 +79,9 @@ class DroneAcharyaController:
         self._recorder = None  # type: Optional[DroneRecorder]
         self._rec_thread = None  # type: Optional[threading.Thread]
         self._rec_stop_event = threading.Event()
+
+        # Mission session (GPS path recording)
+        self._mission_session = None  # type: Optional[MissionSessionRecorder]
 
         self._command_queue = queue.Queue()  # type: queue.Queue
         self._worker_stop = threading.Event()
@@ -447,6 +452,16 @@ class DroneAcharyaController:
         self._set_state(mission_state="MISSION_RUNNING", last_error="")
         self.telemetry_server.send_log("Mission started.")
 
+        # Create the mission session recorder for this run
+        self._mission_session = MissionSessionRecorder(
+            mission_sessions_dir=self.config.paths.mission_sessions_dir,
+            waypoints=list(self._ordered_waypoints),
+            logger=self.logger,
+        )
+        self.telemetry_server.send_log(
+            "Mission session recording started -> {0}".format(self._mission_session.session_dir)
+        )
+
         mav = MavlinkController(
             connection_string=self.config.mission.mavlink_connection,
             baudrate=self.config.mission.mavlink_baudrate,
@@ -464,7 +479,7 @@ class DroneAcharyaController:
                 flight_speed_m_s=float(self.config.mission.flight_speed_m_s),
                 takeoff_alt_m=float(self.config.mission.default_altitude_m),
                 abort_checker=lambda: self._abort_event.is_set(),
-                telemetry_callback=self._send_live_telemetry,
+                telemetry_callback=self._on_mission_telemetry,
             )
             self._set_state(mission_state="MISSION_COMPLETE", connection_status="CONNECTED")
             self.telemetry_server.send_log("Mission completed.")
@@ -475,6 +490,18 @@ class DroneAcharyaController:
                 mav.close()
             except Exception:
                 pass
+            # Always finalize the session even on abort / error
+            if self._mission_session is not None:
+                try:
+                    session_dir = self._mission_session.finalize()
+                    self._set_state(last_mission_session=str(session_dir))
+                    self.telemetry_server.send_log(
+                        "Mission session saved -> {0}".format(session_dir)
+                    )
+                except Exception as exc:
+                    self.logger.warning("Mission session finalize failed: %s", exc)
+                finally:
+                    self._mission_session = None
 
     def _abort_mission(self) -> Dict[str, Any]:
         self._abort_event.set()
@@ -482,6 +509,21 @@ class DroneAcharyaController:
         self.telemetry_server.send_log("Abort requested by operator.", level="WARNING")
         self._send_status()
         return {"ok": True, "message": "Abort requested."}
+
+    def _on_mission_telemetry(self, payload: Dict[str, Any]) -> None:
+        """Called once per second with live GPS from the drone during mission execution."""
+        # Forward to GCS as usual
+        self.telemetry_server.send_event("TELEMETRY", payload)
+        # Record the point in the mission session
+        if self._mission_session is not None:
+            try:
+                self._mission_session.record_point(
+                    latitude=float(payload.get("latitude", 0.0)),
+                    longitude=float(payload.get("longitude", 0.0)),
+                    altitude_m=float(payload.get("altitude_m", 0.0)),
+                )
+            except Exception as exc:
+                self.logger.warning("Mission session record_point failed: %s", exc)
 
     def _send_live_telemetry(self, payload: Dict[str, Any]) -> None:
         self.telemetry_server.send_event("TELEMETRY", payload)

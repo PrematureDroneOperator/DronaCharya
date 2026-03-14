@@ -3,4 +3,7 @@
 PyYAML            # PINNED for Python 3.6 compatibility (fixes cython_sources error)
 pymavlink
 pyserial           # required by telemetry/radio_bridge.py (radio/Pixhawk serial MAVLink bridge)
-dataclasses 
+dataclasses
+# GCS live satellite map (OSM tiles) — install on the GCS machine (not Jetson)
+requests
+Pillow
